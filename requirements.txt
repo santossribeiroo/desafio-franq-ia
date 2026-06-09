@@ -1,0 +1,7 @@
+langchain
+langgraph
+streamlit
+pandas
+sqlalchemy
+langchain-google-vertexai
+python-dotenv
