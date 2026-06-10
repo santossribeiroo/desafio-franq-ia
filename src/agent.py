@@ -1,6 +1,12 @@
 from typing import TypedDict
 
+from dotenv import load_dotenv
+from langchain_google_vertexai import ChatVertexAI
 from langgraph.graph import END, StateGraph
+
+from src.db_utils import format_schema_for_prompt, get_schema
+
+load_dotenv()
 
 
 class State(TypedDict):
@@ -11,9 +17,42 @@ class State(TypedDict):
     error: str
 
 
+_SYSTEM_PROMPT = """You are an expert SQLite query generator.
+
+You will receive a user question and the full database schema.
+Your sole job is to produce a single, executable SQLite SELECT query that answers the question.
+
+Rules (violations will break the pipeline):
+- Output ONLY the raw SQL string — no markdown, no code fences, no explanation.
+- Never use tables or columns that are not listed in the schema below.
+- Always use explicit column names; never use SELECT *.
+- Use LIMIT when the question asks for top/bottom N results.
+
+Schema:
+{schema}
+"""
+
+
 def generate_sql_node(state: State) -> State:
-    print(f"[generate_sql_node] Received question: '{state.get('user_question')}'")
-    return state
+    try:
+        llm = ChatVertexAI(model_name="gemini-1.5-flash", temperature=0)
+
+        schema_text = format_schema_for_prompt(get_schema())
+        prompt = _SYSTEM_PROMPT.format(schema=schema_text)
+
+        messages = [
+            ("system", prompt),
+            ("human", state["user_question"]),
+        ]
+
+        response = llm.invoke(messages)
+        # Strip any accidental whitespace or newlines the model may add
+        sql = response.content.strip()
+
+        return {**state, "generated_sql": sql}
+
+    except Exception as exc:
+        return {**state, "error": str(exc)}
 
 
 def execute_sql_node(state: State) -> State:
@@ -52,7 +91,7 @@ if __name__ == "__main__":
         "error": "",
     }
 
-    print("=== Running graph with stub nodes ===\n")
+    print("=== Running graph ===\n")
     final_state = app.invoke(initial_state)
 
     print("\n=== Final State ===")
