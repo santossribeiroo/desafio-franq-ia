@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from langchain_google_vertexai import ChatVertexAI
 from langgraph.graph import END, StateGraph
 
-from src.db_utils import format_schema_for_prompt, get_schema
+from src.db_utils import format_schema_for_prompt, get_db_connection, get_schema
 
 load_dotenv()
 
@@ -56,8 +56,23 @@ def generate_sql_node(state: State) -> State:
 
 
 def execute_sql_node(state: State) -> State:
-    print(f"[execute_sql_node] Would execute SQL: '{state.get('generated_sql')}'")
-    return state
+    # Propagate upstream errors without touching the DB
+    if state.get("error"):
+        return state
+
+    sql = state["generated_sql"]
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            # sqlite3.Row objects are not serializable; convert eagerly
+            rows = [dict(row) for row in cursor.fetchall()]
+
+        return {**state, "sql_result": rows, "error": ""}
+
+    except Exception as exc:
+        return {**state, "error": str(exc)}
 
 
 def format_response_node(state: State) -> State:
