@@ -1,3 +1,6 @@
+# Chaves e Credenciais de IA (Segurança)
+*.json
+gcp-credentials.json
 venv/
 env/
 .venv/
