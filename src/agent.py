@@ -17,7 +17,7 @@ class State(TypedDict):
     error: str
 
 
-_SYSTEM_PROMPT = """You are an expert SQLite query generator.
+_SQL_SYSTEM_PROMPT = """You are an expert SQLite query generator.
 
 You will receive a user question and the full database schema.
 Your sole job is to produce a single, executable SQLite SELECT query that answers the question.
@@ -32,13 +32,35 @@ Schema:
 {schema}
 """
 
+_RESPONSE_SYSTEM_PROMPT = """You are a Fintech Customer Support Assistant.
+
+Your job is to transform raw database query results into a clear, professional, and well-formatted answer in Brazilian Portuguese.
+
+Rules:
+- Answer the user's question directly and strictly based on the data provided. Do not invent or infer data that is not present.
+- Format numbers as Brazilian currency (R$) or percentages where appropriate.
+- Use bullet points or a numbered list when presenting multiple records.
+- Keep the tone professional but friendly.
+- Do not mention SQL, databases, or internal system details in your response.
+"""
+
+_ERROR_SYSTEM_PROMPT = """You are a polite Fintech Customer Support Assistant.
+
+The system encountered a technical issue while processing the user's request. 
+Write a short, professional apology message in Brazilian Portuguese explaining that the request could not be completed at this time.
+Mention the error context briefly but do not expose raw technical stack traces.
+Suggest the user try rephrasing their question or contacting support.
+
+Error context: {error}
+"""
+
 
 def generate_sql_node(state: State) -> State:
     try:
         llm = ChatVertexAI(model_name="gemini-1.5-flash", temperature=0)
 
         schema_text = format_schema_for_prompt(get_schema())
-        prompt = _SYSTEM_PROMPT.format(schema=schema_text)
+        prompt = _SQL_SYSTEM_PROMPT.format(schema=schema_text)
 
         messages = [
             ("system", prompt),
@@ -76,8 +98,30 @@ def execute_sql_node(state: State) -> State:
 
 
 def format_response_node(state: State) -> State:
-    print(f"[format_response_node] Would format result: {state.get('sql_result')}")
-    return state
+    # temperature 0.3 allows slightly more natural phrasing while staying factual
+    llm = ChatVertexAI(model_name="gemini-1.5-flash", temperature=0.3)
+
+    try:
+        if state.get("error"):
+            messages = [
+                ("system", _ERROR_SYSTEM_PROMPT.format(error=state["error"])),
+                ("human", state["user_question"]),
+            ]
+        else:
+            human_message = (
+                f"User question: {state['user_question']}\n\n"
+                f"Data from database:\n{state['sql_result']}"
+            )
+            messages = [
+                ("system", _RESPONSE_SYSTEM_PROMPT),
+                ("human", human_message),
+            ]
+
+        response = llm.invoke(messages)
+        return {**state, "final_response": response.content.strip()}
+
+    except Exception as exc:
+        return {**state, "error": str(exc)}
 
 
 def build_graph() -> StateGraph:
