@@ -57,7 +57,7 @@ Error context: {error}
 
 def generate_sql_node(state: State) -> State:
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.0)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.0)
 
         schema_text = format_schema_for_prompt(get_schema())
         prompt = _SQL_SYSTEM_PROMPT.format(schema=schema_text)
@@ -99,7 +99,7 @@ def execute_sql_node(state: State) -> State:
 
 def format_response_node(state: State) -> State:
     # temperature 0.3 allows slightly more natural phrasing while staying factual
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
 
     try:
         if state.get("error"):

@@ -3,5 +3,6 @@ langgraph
 streamlit
 pandas
 sqlalchemy
-langchain-google-vertexai
+langchain-google-genai
+google-generativeai
 python-dotenv
