@@ -1,6 +1,7 @@
 langchain
 langgraph
 streamlit
+plotly
 pandas
 sqlalchemy
 langchain-google-genai
