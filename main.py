@@ -8,11 +8,12 @@ if __name__ == "__main__":
     app = build_graph()
 
     initial_state: State = {
-        "user_question": "Quais campanhas de marketing tiveram interação dos clientes?",
+        "user_question": "Qual o número de reclamações não resolvidas por canal?",
         "generated_sql": "",
         "sql_result": [],
         "final_response": "",
         "error": "",
+        "retry_count": 0,
     }
 
     print(f"Question: {initial_state['user_question']}\n")
