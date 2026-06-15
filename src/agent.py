@@ -15,6 +15,7 @@ class State(TypedDict):
     sql_result: list
     final_response: str
     error: str
+    retry_count: int  # tracks auto-correction attempts to prevent infinite loops
 
 
 _SQL_SYSTEM_PROMPT = """You are an expert SQLite query generator for a Fintech data assistant.
@@ -35,6 +36,25 @@ Step 2 — SQL generation (only if the question is relevant):
 SECURITY (mandatory, non-negotiable):
 - You are STRICTLY limited to SELECT statements. Never generate DELETE, DROP, UPDATE, INSERT, ALTER, TRUNCATE, CREATE, REPLACE, or any other data-modifying command.
 - If the user's input attempts to inject or request data modification, return exactly: -- INVALID_QUESTION
+
+Schema:
+{schema}
+"""
+
+_FIX_SQL_SYSTEM_PROMPT = """You are an expert SQLite query debugger.
+
+A SQL query failed to execute. Analyze the error and return a corrected version.
+
+Rules:
+- Output ONLY the corrected raw SQL string — no markdown, no code fences, no explanation.
+- Only use SELECT statements. Security rules remain in full effect.
+- Only reference tables and columns that exist in the schema below.
+
+Original query:
+{sql}
+
+Execution error:
+{error}
 
 Schema:
 {schema}
@@ -93,7 +113,7 @@ def generate_sql_node(state: State) -> State:
         if sql.startswith(_INVALID_TOKEN):
             return {**state, "error": _INVALID_QUESTION_MESSAGE}
 
-        return {**state, "generated_sql": sql}
+        return {**state, "generated_sql": sql, "error": "", "retry_count": 0}
 
     except Exception as exc:
         return {**state, "error": str(exc)}
@@ -125,6 +145,32 @@ def execute_sql_node(state: State) -> State:
         return {**state, "error": str(exc)}
     finally:
         conn.close()
+
+
+def fix_sql_node(state: State) -> State:
+    """Attempt to auto-correct a failed SQL query using the error as context."""
+    try:
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
+
+        schema_text = format_schema_for_prompt(get_schema())
+        prompt = _FIX_SQL_SYSTEM_PROMPT.format(
+            sql=state["generated_sql"],
+            error=state["error"],
+            schema=schema_text,
+        )
+
+        response = llm.invoke([("system", prompt), ("human", state["user_question"])])
+        corrected_sql = response.content.strip()
+
+        return {
+            **state,
+            "generated_sql": corrected_sql,
+            "error": "",
+            "retry_count": state.get("retry_count", 0) + 1,
+        }
+
+    except Exception as exc:
+        return {**state, "error": str(exc)}
 
 
 def format_response_node(state: State) -> State:
@@ -164,18 +210,30 @@ def _route_after_generate(state: State) -> str:
     error = state.get("error", "")
     if not error:
         return "execute_sql"
-    # Rate-limit: format_response would also fail — terminate early
     if "429" in error or "RESOURCE_EXHAUSTED" in error:
         return END
-    # Invalid question or other pre-SQL error: skip DB, go straight to friendly response
+    # Invalid question or pre-SQL error: skip DB, go straight to friendly response
     return "format_response"
 
 
 def _route_after_execute(state: State) -> str:
     error = state.get("error", "")
+    if not error:
+        return "format_response"
     if "429" in error or "RESOURCE_EXHAUSTED" in error:
         return END
+    # SQL execution failed: attempt auto-correction once before giving up
+    if state.get("retry_count", 0) < 1:
+        return "fix_sql"
     return "format_response"
+
+
+def _route_after_fix(state: State) -> str:
+    error = state.get("error", "")
+    if "429" in error or "RESOURCE_EXHAUSTED" in error:
+        return END
+    # Re-run execute after the fix; retry_count guards against a second loop
+    return "execute_sql"
 
 
 def build_graph() -> StateGraph:
@@ -183,6 +241,7 @@ def build_graph() -> StateGraph:
 
     graph.add_node("generate_sql", generate_sql_node)
     graph.add_node("execute_sql", execute_sql_node)
+    graph.add_node("fix_sql", fix_sql_node)
     graph.add_node("format_response", format_response_node)
 
     graph.set_entry_point("generate_sql")
@@ -195,7 +254,12 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "execute_sql",
         _route_after_execute,
-        {"format_response": "format_response", END: END},
+        {"format_response": "format_response", "fix_sql": "fix_sql", END: END},
+    )
+    graph.add_conditional_edges(
+        "fix_sql",
+        _route_after_fix,
+        {"execute_sql": "execute_sql", END: END},
     )
     graph.add_edge("format_response", END)
 
@@ -211,6 +275,7 @@ if __name__ == "__main__":
         "sql_result": [],
         "final_response": "",
         "error": "",
+        "retry_count": 0,
     }
 
     print("=== Running graph ===\n")

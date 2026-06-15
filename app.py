@@ -182,11 +182,17 @@ def run_agent(user_input: str) -> State:
         "sql_result": [],
         "final_response": "",
         "error": "",
+        "retry_count": 0,
     }
     return get_graph().invoke(initial_state)
 
 
-def _detect_chart_columns(df: pd.DataFrame) -> tuple[str, str] | None:
+# Keywords that suggest a column represents a time axis
+_TEMPORAL_KEYWORDS = {"data", "date", "mes", "ano", "year", "month", "periodo", "semana", "week", "dia", "trimestre"}
+
+
+def _detect_chart(df: pd.DataFrame) -> tuple[str, str, str] | None:
+    """Return (x_col, y_col, chart_type) or None if no chart is appropriate."""
     # Only render a chart when there are multiple rows worth comparing
     if len(df) < 2:
         return None
@@ -197,7 +203,14 @@ def _detect_chart_columns(df: pd.DataFrame) -> tuple[str, str] | None:
     if not numeric_cols or not text_cols:
         return None
 
-    return text_cols[0], numeric_cols[0]
+    x_col = text_cols[0]
+    y_col = numeric_cols[0]
+
+    # Use a line chart when the x-axis column name suggests a time series
+    is_temporal = any(kw in x_col.lower() for kw in _TEMPORAL_KEYWORDS)
+    chart_type = "line" if is_temporal else "bar"
+
+    return x_col, y_col, chart_type
 
 
 def _is_rate_limit_error(text: str) -> bool:
@@ -232,27 +245,39 @@ def _render_result(result: State) -> None:
             )
             if result.get("sql_result"):
                 df = pd.DataFrame(result["sql_result"])
-                chart_cols = _detect_chart_columns(df)
-                if chart_cols:
-                    x_col, y_col = chart_cols
+                chart = _detect_chart(df)
+                if chart:
+                    x_col, y_col, chart_type = chart
                     st.divider()
                     st.caption("📊 Visualização dos dados")
-                    fig = px.bar(
-                        df,
-                        x=x_col,
-                        y=y_col,
-                        template="plotly_dark",
-                        color=y_col,
-                        color_continuous_scale="Blues",
-                        hover_data=df.columns.tolist(),
-                    )
-                    fig.update_layout(
+
+                    common_layout = dict(
                         plot_bgcolor="rgba(0,0,0,0)",
                         paper_bgcolor="rgba(0,0,0,0)",
                         margin=dict(l=0, r=0, t=30, b=0),
-                        coloraxis_showscale=False,
                         font=dict(family="Inter"),
                     )
+
+                    if chart_type == "line":
+                        fig = px.line(
+                            df, x=x_col, y=y_col,
+                            template="plotly_dark",
+                            markers=True,
+                            hover_data=df.columns.tolist(),
+                        )
+                        fig.update_traces(line=dict(color="#60a5fa", width=2.5))
+                    else:
+                        fig = px.bar(
+                            df, x=x_col, y=y_col,
+                            template="plotly_dark",
+                            color=y_col,
+                            # Sequential blue palette keeps it on-brand and readable
+                            color_continuous_scale="Blues",
+                            hover_data=df.columns.tolist(),
+                        )
+                        common_layout["coloraxis_showscale"] = False
+
+                    fig.update_layout(**common_layout)
                     st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Nenhuma resposta foi gerada para esta pergunta.")

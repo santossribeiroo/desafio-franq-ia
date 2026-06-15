@@ -105,16 +105,17 @@ Pergunta do usuário
 │  generate_sql     │  Valida a pergunta e gera a query SQL (1 chamada ao LLM)
 └────────┬──────────┘
          │ ──► pergunta inválida → format_response (mensagem amigável)
-         │ ──► erro 429 → END (evita chamada extra desnecessária)
+         │ ──► erro 429 → END
          ▼
 ┌───────────────────┐
-│  execute_sql      │  Valida e executa a query no SQLite
+│  execute_sql      │  Valida sintaxe e executa a query no SQLite
 └────────┬──────────┘
-         │
+         │ ──► SQL inválido (1ª vez) → fix_sql (auto-correção)
+         │ ──► SQL inválido (2ª vez) → format_response (erro amigável)
          ▼
-┌───────────────────┐
-│  format_response  │  Transforma os dados em resposta profissional em pt-BR
-└────────┬──────────┘
+┌───────────────────┐       ┌───────────────────┐
+│  format_response  │◄──────│    fix_sql        │  Corrige o SQL usando o erro como contexto
+└────────┬──────────┘       └───────────────────┘
          │
          ▼
   Resposta final ao usuário
@@ -124,6 +125,7 @@ Pergunta do usuário
 |---|---|
 | `generate_sql_node` | Lê o schema real do banco em tempo de execução, valida se a pergunta é respondível e retorna apenas a query SQL executável |
 | `execute_sql_node` | Bloqueia queries não-SELECT por segurança, valida sintaxe com `EXPLAIN QUERY PLAN` e executa no SQLite |
+| `fix_sql_node` | Quando o SQL falha, usa o erro e o schema como contexto para gerar automaticamente uma versão corrigida (máximo 1 tentativa) |
 | `format_response_node` | Transforma os dados brutos em resposta profissional em pt-BR, ou gera mensagem de erro amigável |
 
 O modelo utilizado é o **Gemini 2.5 Flash Lite** via `langchain-google-genai`, com temperatura `0` para geração de SQL (máxima precisão) e `0.3` para a resposta final (tom mais natural).
