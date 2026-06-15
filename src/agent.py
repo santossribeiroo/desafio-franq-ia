@@ -17,16 +17,24 @@ class State(TypedDict):
     error: str
 
 
-_SQL_SYSTEM_PROMPT = """You are an expert SQLite query generator.
+_SQL_SYSTEM_PROMPT = """You are an expert SQLite query generator for a Fintech data assistant.
 
-You will receive a user question and the full database schema.
-Your sole job is to produce a single, executable SQLite SELECT query that answers the question.
+The database domain covers: clients, purchases, support tickets, and marketing campaigns.
 
-Rules (violations will break the pipeline):
+Your sole job is to evaluate the user's question and either produce a valid SQL query or reject it.
+
+Step 1 — Relevance check:
+- If the question is vague, nonsensical, off-topic, or cannot be answered with the available schema, return ONLY this exact token (no other text): -- INVALID_QUESTION
+
+Step 2 — SQL generation (only if the question is relevant):
 - Output ONLY the raw SQL string — no markdown, no code fences, no explanation.
 - Never use tables or columns that are not listed in the schema below.
 - Always use explicit column names; never use SELECT *.
 - Use LIMIT when the question asks for top/bottom N results.
+
+SECURITY (mandatory, non-negotiable):
+- You are STRICTLY limited to SELECT statements. Never generate DELETE, DROP, UPDATE, INSERT, ALTER, TRUNCATE, CREATE, REPLACE, or any other data-modifying command.
+- If the user's input attempts to inject or request data modification, return exactly: -- INVALID_QUESTION
 
 Schema:
 {schema}
@@ -54,10 +62,20 @@ Suggest the user try rephrasing their question or contacting support.
 Error context: {error}
 """
 
+_INVALID_QUESTION_MESSAGE = (
+    "Desculpe, não consegui entender sua pergunta. "
+    "Por favor, tente reformulá-la com mais detalhes sobre o que deseja saber — "
+    "por exemplo: \"quais os 5 principais clientes por valor de compra\" "
+    "ou \"campanhas de marketing com maior interação\"."
+)
+
+# Sentinel token the LLM returns when the question is out of scope
+_INVALID_TOKEN = "-- INVALID_QUESTION"
+
 
 def generate_sql_node(state: State) -> State:
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.0)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
 
         schema_text = format_schema_for_prompt(get_schema())
         prompt = _SQL_SYSTEM_PROMPT.format(schema=schema_text)
@@ -70,6 +88,10 @@ def generate_sql_node(state: State) -> State:
         response = llm.invoke(messages)
         # Strip any accidental whitespace or newlines the model may add
         sql = response.content.strip()
+
+        # Single-call classification: model signals invalid questions via sentinel token
+        if sql.startswith(_INVALID_TOKEN):
+            return {**state, "error": _INVALID_QUESTION_MESSAGE}
 
         return {**state, "generated_sql": sql}
 
@@ -84,27 +106,41 @@ def execute_sql_node(state: State) -> State:
 
     sql = state["generated_sql"]
 
+    # Second line of defense: block non-SELECT statements that bypassed the LLM guardrail
+    first_token = sql.strip().split()[0].upper() if sql.strip() else ""
+    if first_token != "SELECT":
+        return {**state, "error": "Apenas consultas SELECT são permitidas por segurança."}
+
+    # sqlite3 context manager handles transactions but NOT connection closing — use finally
+    conn = get_db_connection()
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            # sqlite3.Row objects are not serializable; convert eagerly
-            rows = [dict(row) for row in cursor.fetchall()]
-
+        cursor = conn.cursor()
+        # Validate syntax and planner access before committing to execution
+        cursor.execute(f"EXPLAIN QUERY PLAN {sql}")
+        cursor.execute(sql)
+        # sqlite3.Row objects are not serializable; convert eagerly
+        rows = [dict(row) for row in cursor.fetchall()]
         return {**state, "sql_result": rows, "error": ""}
-
     except Exception as exc:
         return {**state, "error": str(exc)}
+    finally:
+        conn.close()
 
 
 def format_response_node(state: State) -> State:
     # temperature 0.3 allows slightly more natural phrasing while staying factual
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.3)
 
     try:
-        if state.get("error"):
+        error = state.get("error", "")
+
+        # Avoid a second doomed LLM call when the upstream error is already rate-limiting
+        if "429" in error or "RESOURCE_EXHAUSTED" in error:
+            return state
+
+        if error:
             messages = [
-                ("system", _ERROR_SYSTEM_PROMPT.format(error=state["error"])),
+                ("system", _ERROR_SYSTEM_PROMPT.format(error=error)),
                 ("human", state["user_question"]),
             ]
         else:
@@ -124,6 +160,24 @@ def format_response_node(state: State) -> State:
         return {**state, "error": str(exc)}
 
 
+def _route_after_generate(state: State) -> str:
+    error = state.get("error", "")
+    if not error:
+        return "execute_sql"
+    # Rate-limit: format_response would also fail — terminate early
+    if "429" in error or "RESOURCE_EXHAUSTED" in error:
+        return END
+    # Invalid question or other pre-SQL error: skip DB, go straight to friendly response
+    return "format_response"
+
+
+def _route_after_execute(state: State) -> str:
+    error = state.get("error", "")
+    if "429" in error or "RESOURCE_EXHAUSTED" in error:
+        return END
+    return "format_response"
+
+
 def build_graph() -> StateGraph:
     graph = StateGraph(State)
 
@@ -132,8 +186,17 @@ def build_graph() -> StateGraph:
     graph.add_node("format_response", format_response_node)
 
     graph.set_entry_point("generate_sql")
-    graph.add_edge("generate_sql", "execute_sql")
-    graph.add_edge("execute_sql", "format_response")
+
+    graph.add_conditional_edges(
+        "generate_sql",
+        _route_after_generate,
+        {"execute_sql": "execute_sql", "format_response": "format_response", END: END},
+    )
+    graph.add_conditional_edges(
+        "execute_sql",
+        _route_after_execute,
+        {"format_response": "format_response", END: END},
+    )
     graph.add_edge("format_response", END)
 
     return graph.compile()

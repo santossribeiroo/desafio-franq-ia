@@ -57,6 +57,12 @@ GOOGLE_API_KEY="sua-chave-aqui"
 python main.py
 ```
 
+### 6. Rode os testes automatizados
+
+```bash
+python -m pytest tests/ -v
+```
+
 O terminal exibirá a query SQL gerada e a resposta formatada para a pergunta de exemplo.
 
 ---
