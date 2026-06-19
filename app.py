@@ -1,10 +1,13 @@
+import json
+
 import pandas as pd
 import plotly.express as px
 import sqlparse
 import streamlit as st
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage, ToolMessage
 
-from src.agent import State, build_graph
+from src.agent import build_agent
 
 load_dotenv()
 
@@ -143,6 +146,24 @@ st.markdown(
         line-height: 1.7;
     }
 
+    /* ── Reasoning step card ── */
+    .step-card {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-left: 3px solid #60a5fa;
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
+        margin-bottom: 0.75rem;
+    }
+    .step-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: #60a5fa;
+        margin-bottom: 0.4rem;
+    }
+
     /* ── History message bubbles ── */
     .msg-user {
         background: rgba(96, 165, 250, 0.1);
@@ -169,22 +190,13 @@ st.markdown(
 )
 
 
-# Compile once and cache so the graph isn't rebuilt on every interaction
 @st.cache_resource
-def get_graph():
-    return build_graph()
+def get_agent():
+    return build_agent()
 
 
-def run_agent(user_input: str) -> State:
-    initial_state: State = {
-        "user_question": user_input,
-        "generated_sql": "",
-        "sql_result": [],
-        "final_response": "",
-        "error": "",
-        "retry_count": 0,
-    }
-    return get_graph().invoke(initial_state)
+def run_agent(user_input: str) -> dict:
+    return get_agent().invoke({"messages": [("human", user_input)]})
 
 
 # Keywords that suggest a column represents a time axis
@@ -193,7 +205,6 @@ _TEMPORAL_KEYWORDS = {"data", "date", "mes", "ano", "year", "month", "periodo", 
 
 def _detect_chart(df: pd.DataFrame) -> tuple[str, str, str] | None:
     """Return (x_col, y_col, chart_type) or None if no chart is appropriate."""
-    # Only render a chart when there are multiple rows worth comparing
     if len(df) < 2:
         return None
 
@@ -206,7 +217,6 @@ def _detect_chart(df: pd.DataFrame) -> tuple[str, str, str] | None:
     x_col = text_cols[0]
     y_col = numeric_cols[0]
 
-    # Use a line chart when the x-axis column name suggests a time series
     is_temporal = any(kw in x_col.lower() for kw in _TEMPORAL_KEYWORDS)
     chart_type = "line" if is_temporal else "bar"
 
@@ -217,34 +227,73 @@ def _is_rate_limit_error(text: str) -> bool:
     return "429" in text or "RESOURCE_EXHAUSTED" in text
 
 
-def _render_result(result: State) -> None:
-    """Render tabs with agent response and reasoning for a single result."""
-    error_text = result.get("error", "")
+def _parse_agent_result(result: dict) -> dict:
+    """
+    Extract the final answer, tool call steps, and last SQL dataset from the
+    ReAct agent's message list. Each AIMessage with tool_calls represents one
+    reasoning step; the subsequent ToolMessages carry the observations.
+    """
+    messages = result.get("messages", [])
 
-    if error_text and _is_rate_limit_error(error_text):
-        st.warning(
-            "⚠️ **Limite de requisições atingido temporariamente.**\n\n"
-            "Estamos na camada gratuita da API Gemini. "
-            "Aguarde **30 a 40 segundos** e tente novamente."
-        )
-        return
+    final_response = ""
+    tool_steps: list[dict] = []
+    last_sql_rows: list[dict] = []
 
-    if error_text and not result.get("final_response"):
-        st.error(f"Não foi possível processar a solicitação.\n\n`{error_text}`")
-        return
+    for i, msg in enumerate(messages):
+        if isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    # Match each tool call with its ToolMessage observation
+                    output = next(
+                        (m.content for m in messages[i + 1 :] if isinstance(m, ToolMessage) and m.tool_call_id == tc["id"]),
+                        "",
+                    )
+                    tool_steps.append({
+                        "tool": tc["name"],
+                        "args": tc["args"],
+                        "output": output,
+                    })
+
+                    # Keep the last successful SQL result for the chart / table
+                    if tc["name"] == "execute_sql_query" and output and not output.startswith("ERROR"):
+                        try:
+                            rows = json.loads(output)
+                            if isinstance(rows, list) and rows:
+                                last_sql_rows = rows
+                        except json.JSONDecodeError:
+                            pass
+            else:
+                # Final AIMessage has no tool_calls — this is the synthesised answer
+                content = msg.content
+                if isinstance(content, list):
+                    content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+                if content:
+                    final_response = content
+
+    return {
+        "final_response": final_response,
+        "tool_steps": tool_steps,
+        "last_sql_rows": last_sql_rows,
+    }
+
+
+def _render_result(agent_output: dict) -> None:
+    """Render result tabs for a single agent invocation."""
+    final_response = agent_output["final_response"]
+    tool_steps = agent_output["tool_steps"]
+    last_sql_rows = agent_output["last_sql_rows"]
 
     tab_response, tab_reasoning = st.tabs(["💬 Resposta", "🔍 Raciocínio do Agente"])
 
     with tab_response:
-        if error_text:
-            st.warning(error_text)
-        elif result.get("final_response"):
+        if final_response:
             st.markdown(
-                f'<div class="response-card">{result["final_response"]}</div>',
+                f'<div class="response-card">{final_response}</div>',
                 unsafe_allow_html=True,
             )
-            if result.get("sql_result"):
-                df = pd.DataFrame(result["sql_result"])
+
+            if last_sql_rows:
+                df = pd.DataFrame(last_sql_rows)
                 chart = _detect_chart(df)
                 if chart:
                     x_col, y_col, chart_type = chart
@@ -259,22 +308,10 @@ def _render_result(result: State) -> None:
                     )
 
                     if chart_type == "line":
-                        fig = px.line(
-                            df, x=x_col, y=y_col,
-                            template="plotly_dark",
-                            markers=True,
-                            hover_data=df.columns.tolist(),
-                        )
+                        fig = px.line(df, x=x_col, y=y_col, template="plotly_dark", markers=True, hover_data=df.columns.tolist())
                         fig.update_traces(line=dict(color="#60a5fa", width=2.5))
                     else:
-                        fig = px.bar(
-                            df, x=x_col, y=y_col,
-                            template="plotly_dark",
-                            color=y_col,
-                            # Sequential blue palette keeps it on-brand and readable
-                            color_continuous_scale="Blues",
-                            hover_data=df.columns.tolist(),
-                        )
+                        fig = px.bar(df, x=x_col, y=y_col, template="plotly_dark", color=y_col, color_continuous_scale="Blues", hover_data=df.columns.tolist())
                         common_layout["coloraxis_showscale"] = False
 
                     fig.update_layout(**common_layout)
@@ -283,36 +320,55 @@ def _render_result(result: State) -> None:
             st.info("Nenhuma resposta foi gerada para esta pergunta.")
 
     with tab_reasoning:
-        st.subheader("Query SQL gerada")
-        if result.get("generated_sql"):
-            # Format SQL with indentation and uppercase keywords for readability
-            formatted_sql = sqlparse.format(
-                result["generated_sql"],
-                reindent=True,
-                keyword_case="upper",
-                indent_width=4,
-            )
-            st.code(formatted_sql, language="sql")
-        else:
-            st.info("Nenhuma query foi gerada.")
+        if not tool_steps:
+            st.info("Nenhuma ação foi registrada.")
+            return
 
-        st.subheader("Dados retornados pelo banco")
-        if result.get("sql_result"):
-            df_result = pd.DataFrame(result["sql_result"])
-            st.dataframe(
-                df_result,
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption(f"{len(df_result)} registro(s) retornado(s)")
-        else:
-            st.info("A consulta não retornou registros.")
+        st.caption(f"O agente executou **{len(tool_steps)}** ação(ões) para responder sua pergunta.")
+        st.divider()
+
+        for idx, step in enumerate(tool_steps, 1):
+            tool_name = step["tool"]
+            args = step["args"]
+            output = step["output"]
+
+            if tool_name == "get_database_schema":
+                with st.expander(f"**Passo {idx} — Consultar estrutura do banco de dados**", expanded=False):
+                    st.markdown('<div class="step-label">🗂️ Ferramenta: get_database_schema</div>', unsafe_allow_html=True)
+                    st.code(output, language="text")
+
+            elif tool_name == "execute_sql_query":
+                sql = args.get("sql", "")
+                formatted_sql = sqlparse.format(sql, reindent=True, keyword_case="upper", indent_width=4)
+
+                with st.expander(f"**Passo {idx} — Executar consulta SQL**", expanded=True):
+                    st.markdown('<div class="step-label">⚙️ Ferramenta: execute_sql_query</div>', unsafe_allow_html=True)
+                    st.code(formatted_sql, language="sql")
+
+                    if output.startswith("ERROR"):
+                        st.error(output)
+                    else:
+                        try:
+                            rows = json.loads(output)
+                            if isinstance(rows, list) and rows:
+                                df_step = pd.DataFrame(rows)
+                                st.dataframe(df_step, use_container_width=True, hide_index=True)
+                                st.caption(f"{len(df_step)} registro(s) retornado(s)")
+                            else:
+                                st.info(output)
+                        except json.JSONDecodeError:
+                            st.text(output)
+
+            else:
+                with st.expander(f"**Passo {idx} — {tool_name}**", expanded=False):
+                    st.json(args)
+                    st.text(output)
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of {question, response_text}
+    st.session_state.history = []
 
 # ── Sidebar — conversation history ────────────────────────────────────────────
 
@@ -327,8 +383,9 @@ with st.sidebar:
 
         st.divider()
 
-        for i, entry in enumerate(reversed(st.session_state.history), 1):
-            with st.expander(f"**{entry['question'][:55]}...**" if len(entry['question']) > 55 else f"**{entry['question']}**"):
+        for entry in reversed(st.session_state.history):
+            label = entry["question"][:55] + "..." if len(entry["question"]) > 55 else entry["question"]
+            with st.expander(f"**{label}**"):
                 st.markdown(entry["response"])
     else:
         st.info("Nenhuma consulta realizada ainda.")
@@ -350,16 +407,16 @@ question = st.text_input(
 
 submitted = st.button("Enviar", type="primary", use_container_width=True)
 
-# ── Pipeline execution ────────────────────────────────────────────────────────
+# ── Agent execution ───────────────────────────────────────────────────────────
 
 if submitted:
     if not question.strip():
         st.warning("Por favor, digite uma pergunta antes de enviar.")
     else:
         try:
-            with st.spinner("Consultando os dados..."):
-                result = run_agent(question.strip())
-        except Exception as exc:
+            with st.spinner("Analisando e consultando os dados..."):
+                raw_result = run_agent(question.strip())
+        except Exception as exc:  # noqa: BLE001 — catch-all needed at UI boundary
             if _is_rate_limit_error(str(exc)):
                 st.warning(
                     "⚠️ **Limite de requisições atingido temporariamente.**\n\n"
@@ -370,11 +427,12 @@ if submitted:
                 st.error(f"Ocorreu um erro inesperado. Tente novamente.\n\n`{exc}`")
             st.stop()
 
-        st.divider()
-        _render_result(result)
+        parsed = _parse_agent_result(raw_result)
 
-        # Persist to history only when a readable response exists
-        response_text = result.get("final_response") or result.get("error", "")
+        st.divider()
+        _render_result(parsed)
+
+        response_text = parsed["final_response"]
         if response_text and not _is_rate_limit_error(response_text):
             st.session_state.history.append(
                 {"question": question.strip(), "response": response_text}

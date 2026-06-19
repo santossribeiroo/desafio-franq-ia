@@ -1,27 +1,34 @@
-from dotenv import load_dotenv
+"""
+Quick end-to-end smoke test for the ReAct agent — run from the project root:
+    python main.py
+"""
+import sys
 
-from src.agent import State, build_graph
+# Force UTF-8 output so Portuguese characters don't break on Windows terminals
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
-load_dotenv()
+from src.agent import build_agent  # noqa: E402
 
 if __name__ == "__main__":
-    app = build_graph()
+    agent = build_agent()
+    question = "Qual é o valor total de compras realizadas por clientes ativos?"
 
-    initial_state: State = {
-        "user_question": "Qual o número de reclamações não resolvidas por canal?",
-        "generated_sql": "",
-        "sql_result": [],
-        "final_response": "",
-        "error": "",
-        "retry_count": 0,
-    }
+    print(f"Pergunta: {question}\n")
+    print("=" * 60)
 
-    print(f"Question: {initial_state['user_question']}\n")
+    result = agent.invoke({"messages": [("human", question)]})
 
-    final_state = app.invoke(initial_state)
+    for msg in result["messages"]:
+        role = type(msg).__name__
+        content = msg.content
 
-    print(f"Generated SQL:\n{final_state['generated_sql']}\n")
-    print(f"Final Response:\n{final_state['final_response']}")
+        # Gemini sometimes returns content as a list of content blocks
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
 
-    if final_state.get("error"):
-        print(f"\nError: {final_state['error']}")
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                print(f"[{role}] -> tool '{tc['name']}' | args: {tc['args']}")
+        elif content:
+            print(f"[{role}]\n{content}\n")
