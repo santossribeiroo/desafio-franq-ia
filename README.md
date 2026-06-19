@@ -1,65 +1,58 @@
 # Assistente Virtual de Dados — Desafio FRANQ
 
-Assistente conversacional que transforma perguntas em linguagem natural em consultas SQL, executa-as em um banco de dados SQLite e retorna respostas claras em Português do Brasil, com interface visual interativa via Streamlit.
+Assistente conversacional Text-to-SQL que transforma perguntas em linguagem natural em consultas SQLite, executa-as e retorna respostas claras em Português do Brasil, com interface interativa via Streamlit.
 
 Repositório: [github.com/santossribeiroo/desafio-franq-ia](https://github.com/santossribeiroo/desafio-franq-ia.git)
 
 ---
 
-## Pré-requisitos
+## Sumário
 
-- **Python 3.11+** instalado — [python.org/downloads](https://www.python.org/downloads/)
-- **Chave de API do Google Gemini** — obtida gratuitamente em [aistudio.google.com](https://aistudio.google.com)
-- **Git** — [git-scm.com](https://git-scm.com/)
+1. [Pré-requisitos](#pré-requisitos)
+2. [Instalação](#instalação)
+3. [Configuração](#configuração)
+4. [Executando o projeto](#executando-o-projeto)
+5. [Arquitetura e fluxo ReAct](#arquitetura-e-fluxo-react)
+6. [Funcionalidades](#funcionalidades)
+7. [Exemplos de consultas](#exemplos-de-consultas)
+8. [Testes automatizados](#testes-automatizados)
+9. [Estrutura do projeto](#estrutura-do-projeto)
 
 ---
 
-## Instruções de Execução
+## Pré-requisitos
 
-### 1. Clone o repositório
+- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
+- **Git** — [git-scm.com](https://git-scm.com/)
+- **Chave de API do Google Gemini** *(padrão recomendado)* — gratuita em [aistudio.google.com](https://aistudio.google.com)
+- **Ollama** *(alternativa local, sem limite de requisições)* — [ollama.com](https://ollama.com)
+
+---
+
+## Instalação
 
 ```bash
+# 1. Clone o repositório
 git clone https://github.com/santossribeiroo/desafio-franq-ia.git
 cd desafio-franq-ia
-```
 
-### 2. Crie e ative o ambiente virtual
-
-```bash
+# 2. Crie e ative o ambiente virtual
 python -m venv venv
 
 # Windows
 venv\Scripts\activate
-
 # macOS / Linux
 source venv/bin/activate
-```
 
-### 3. Instale as dependências
-
-```bash
+# 3. Instale as dependências
 pip install -r requirements.txt
 ```
 
-As seguintes bibliotecas serão instaladas automaticamente:
+---
 
-| Biblioteca | Uso |
-|---|---|
-| `langchain` + `langgraph` | Orquestração do agente como grafo de estados |
-| `langchain-google-genai` | Integração com os modelos Gemini |
-| `google-generativeai` | SDK oficial do Google para a API Gemini |
-| `streamlit` | Interface visual interativa |
-| `plotly` | Gráficos interativos |
-| `pandas` | Manipulação dos resultados do banco |
-| `sqlparse` | Formatação da query SQL gerada |
-| `sqlalchemy` | Utilitários de banco de dados |
-| `python-dotenv` | Carregamento de variáveis de ambiente |
+## Configuração
 
-### 4. Configure a chave da API Gemini
-
-Crie sua chave gratuitamente em **[aistudio.google.com](https://aistudio.google.com)** → clique em **"Get API key"**.
-
-Copie o arquivo de exemplo e preencha com sua chave:
+Copie o arquivo de exemplo e configure o provedor de LLM:
 
 ```bash
 # Windows
@@ -69,108 +62,212 @@ copy .env.example .env
 cp .env.example .env
 ```
 
-Abra o arquivo `.env` e cole sua chave:
+### Opção A — Google Gemini (padrão, recomendado para avaliadores)
+
+Obtenha sua chave gratuita em [aistudio.google.com](https://aistudio.google.com) → **"Get API key"**.
 
 ```env
-GOOGLE_API_KEY="sua-chave-do-google-ai-studio-aqui"
+LLM_PROVIDER=gemini
+GOOGLE_API_KEY=sua-chave-aqui
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
-### 5. Execute a interface Streamlit
+### Opção B — Ollama local (sem limite de requisições)
+
+Ideal para desenvolvimento local com hardware compatível (GPU com 8 GB+ VRAM).
 
 ```bash
-streamlit run app.py
+# Baixe o modelo (≈9 GB, uma única vez)
+ollama pull qwen2.5:14b
 ```
 
-Acesse no navegador: [http://localhost:8501](http://localhost:8501)
-
-### 6. (Opcional) Teste o pipeline via terminal
-
-```bash
-python main.py
+```env
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-O terminal exibirá a query SQL gerada e a resposta formatada para uma pergunta de exemplo.
+> O modelo `qwen2.5:14b` apresenta excelente desempenho em tarefas SQL e cabe confortavelmente em GPUs com 10 GB VRAM.
 
 ---
 
-## Arquitetura e Fluxo de Agentes
+## Executando o projeto
 
-O assistente é implementado como um **agente ReAct** (*Reason + Act*) usando o **LangGraph**. Isso significa que o modelo de linguagem não segue um roteiro fixo — ele raciocina sobre a pergunta, decide quais ferramentas chamar e quantas vezes, e adapta o plano com base nas respostas que recebe.
+```bash
+# Interface Streamlit (recomendado)
+streamlit run app.py
+```
 
-### Como funciona o loop ReAct
+Acesse: [http://localhost:8501](http://localhost:8501)
+
+```bash
+# Smoke test via terminal (opcional)
+python main.py
+```
+
+---
+
+## Arquitetura e fluxo ReAct
+
+O assistente é implementado como um **agente ReAct** (*Reason + Act*) usando **LangGraph**. O modelo raciocina sobre a pergunta, decide quais ferramentas chamar, observa os resultados e adapta o plano — sem seguir um roteiro fixo.
 
 ```
 Pergunta do usuário
         │
         ▼
-┌─────────────────────────────────┐
-│  LLM (Gemini 2.5 Flash)        │◄──────────────────┐
-│  Decide a próxima ação         │                   │
-└──────┬──────────────────────────┘                   │
-       │                                              │
-       ├─► Chamar get_database_schema                 │
-       │        │                                     │
-       │        └─► Retorna schema (tabelas/colunas)  │
-       │                    │ observação              │
-       │                    └─────────────────────────┘
+┌─────────────────────────────┐
+│  LLM (Gemini / Ollama)      │◄──────────────────┐
+│  Decide a próxima ação      │                   │
+└──────┬──────────────────────┘                   │
+       │                                          │
+       ├─► get_database_schema                    │
+       │        └─► Retorna schema completo       │
+       │                 │ observação             │
+       │                 └────────────────────────┘
        │
-       ├─► Chamar execute_sql_query (pode chamar várias vezes)
-       │        │
-       │        └─► Retorna dados do SQLite em JSON
-       │                    │ observação
-       │                    └─────────────────────────┐
-       │                                              │
-       │   LLM analisa os dados e raciocina de novo ──┘
+       ├─► execute_sql_query  (pode chamar N vezes)
+       │        └─► Retorna dados JSON do SQLite
+       │                 │ observação
+       │                 └────────────────────────┐
+       │                                          │
+       │   LLM analisa e raciocina novamente ─────┘
        │
-       └─► Sem mais ferramentas → Resposta final em pt-BR
+       └─► Resposta final em pt-BR
 ```
 
-### Ferramentas disponíveis para o agente
+### Ferramentas disponíveis
 
 | Ferramenta | Descrição |
 |---|---|
-| `get_database_schema` | Retorna a estrutura completa do banco: tabelas, colunas e tipos. O agente chama esta ferramenta primeiro, antes de construir qualquer query. |
-| `execute_sql_query` | Executa uma query SELECT no SQLite (modo somente leitura) e retorna os resultados. Pode ser chamada várias vezes na mesma interação. |
+| `get_database_schema` | Retorna schema completo (tabelas, colunas, tipos, PKs). Sempre executada primeiro. Resultado em cache por sessão. |
+| `execute_sql_query` | Executa SELECT no SQLite (somente leitura). Injeta `LIMIT 200` automaticamente, valida sintaxe via `EXPLAIN QUERY PLAN`, timeout de 10s. Resultado em cache por query. |
 
-### Por que ReAct e não pipeline fixo?
+### Por que ReAct em vez de pipeline fixo?
 
-Em vez de um fluxo linear (`gerar SQL → executar → formatar`), o agente:
-- **Explora** o banco de dados antes de assumir nomes de tabelas ou colunas.
-- **Adapta** a query se ela retornar erro ou resultado inesperado.
-- **Combina** múltiplas consultas quando a pergunta exige isso.
-- **Decide sozinho** quando tem informação suficiente para responder.
+| Pipeline fixo | Agente ReAct |
+|---|---|
+| Assume nomes de tabelas | Consulta o schema antes de qualquer query |
+| Para no primeiro erro | Reformula a query e tenta novamente |
+| Uma query por pergunta | Combina múltiplas queries quando necessário |
+| Não mantém contexto | Usa histórico para perguntas de acompanhamento |
 
-O modelo utilizado é o **Gemini 2.5 Flash** via `langchain-google-genai`, com temperatura `0` para máxima precisão nas queries.
+### Provedor de LLM configurável
+
+A fábrica `src/llm.py` lê `LLM_PROVIDER` do `.env` e retorna o modelo correto — sem alterar nenhum outro arquivo:
+
+```
+LLM_PROVIDER=gemini  →  ChatGoogleGenerativeAI (gemini-2.5-flash)
+LLM_PROVIDER=ollama  →  ChatOllama (qwen2.5:14b)
+```
 
 ---
 
-## Exemplos de Consultas Testadas
+## Funcionalidades
+
+### Inteligência do agente
+
+| Funcionalidade | Detalhes |
+|---|---|
+| **Loop ReAct estrito** | `langgraph.prebuilt.create_react_agent v1` — o modelo obrigatoriamente chama ferramentas antes de responder |
+| **Schema-first** | `get_database_schema` é sempre a primeira ação — elimina alucinações de nomes de tabela |
+| **Memória conversacional** | Histórico completo de mensagens passado ao agente — suporta perguntas de acompanhamento ("e desse grupo...?") |
+| **Sumarização de contexto** | Após 50 mensagens, o histórico mais antigo é resumido automaticamente para controlar o uso de tokens |
+| **Rejeição fora do escopo** | Perguntas não relacionadas ao banco são respondidas diretamente, sem chamar ferramentas |
+
+### Interface Streamlit
+
+| Funcionalidade | Detalhes |
+|---|---|
+| **Streaming em tempo real** | Cada etapa do agente (schema, SQL, resultado) aparece conforme é executada via `st.status()` |
+| **Persistência de resultados** | Resultados sobrevivem a reruns da UI (troca de gráfico, zoom) via `st.session_state` |
+| **Perguntas sugeridas** | 3 sugestões de acompanhamento geradas pelo LLM após cada resposta |
+| **Gráficos interativos** | Barras, Linha, Pizza e Dispersão — selecionáveis sem re-executar a query |
+| **Resumo estatístico** | Mín, Máx, Média, Total para colunas numéricas |
+| **Detecção de outliers** | Método IQR com aviso automático |
+| **Exportar CSV** | Download dos dados retornados pela última consulta |
+| **Feedback** | Botões 👍/👎 persistidos em `data/feedback.json` |
+| **Sessão persistente** | Histórico e feedback sobrevivem a refresh via `data/session.json` |
+| **Schema na sidebar** | Árvore de tabelas/colunas com prévia de 3 linhas |
+| **Exemplos clicáveis** | Welcome screen e sidebar com atalhos para consultas comuns |
+| **Exportar conversa** | Download do histórico completo em Markdown |
+
+### Segurança e robustez
+
+| Mecanismo | Detalhes |
+|---|---|
+| **Somente SELECT** | Queries não-SELECT são bloqueadas antes de chegar ao SQLite |
+| **Conexão read-only** | `PRAGMA query_only = ON` a cada execução |
+| **Timeout de query** | 10 segundos via `sqlite3.set_progress_handler` |
+| **LIMIT automático** | Injeta `LIMIT 200` se ausente — previne full-table scans |
+| **Cache de schema** | Uma única leitura do DB por processo |
+| **Cache de queries** | LRU com 50 entradas — evita re-execução de queries idênticas |
+| **Retry automático** | Até 3 tentativas com backoff exponencial em erros 429 (Gemini) |
+
+---
+
+## Exemplos de consultas
 
 | Pergunta | Tipo de análise |
 |---|---|
-| `"Quais são os 5 clientes que mais gastaram?"` | Ranking com ORDER BY + LIMIT |
-| `"Qual é o valor médio de compra por categoria?"` | Agregação com GROUP BY + AVG |
-| `"Qual canal de compra gerou mais receita?"` | GROUP BY + SUM |
-| `"Qual cidade tem mais clientes?"` | Contagem por agrupamento |
-| `"Quantos chamados de suporte foram resolvidos?"` | Filtro booleano |
-| `"Quais campanhas de marketing tiveram mais interações?"` | Análise de campanhas |
-| `"Quantos clientes interagiram com campanhas de WhatsApp em 2024?"` | Filtro multi-coluna + data |
+| `Quais são os 5 clientes que mais gastaram?` | Ranking — ORDER BY + LIMIT |
+| `Qual é a receita total por categoria de compra?` | Agregação — GROUP BY + SUM |
+| `Qual canal de compra gerou mais receita?` | GROUP BY + SUM |
+| `Quais campanhas de marketing tiveram mais interações?` | Contagem com filtro booleano |
+| `Qual a porcentagem de clientes que interagiram com cada campanha?` | Cálculo proporcional com subquery |
+| `Quantos chamados de suporte foram resolvidos?` | Filtro booleano |
+| `Qual foi a receita total de compras por mês?` | Série temporal — GROUP BY mês |
+| `E nos últimos 6 meses, qual categoria cresceu mais?` | Pergunta de acompanhamento (usa contexto) |
 
 ---
 
-## Funcionalidades da Interface
+## Testes automatizados
 
-| Funcionalidade | Descrição |
+20 testes unitários cobrindo as três camadas principais:
+
+```bash
+pytest tests/ -v
+```
+
+| Módulo | Testes |
 |---|---|
-| **Raciocínio em tempo real** | Cada passo do agente aparece conforme acontece (schema, SQL, resultado) via `st.status()` |
-| **Memória conversacional** | O histórico completo de mensagens é mantido entre perguntas — o agente entende "e desse grupo, quais...?" |
-| **Perguntas sugeridas** | Após cada resposta, o agente gera 3 sugestões de perguntas de acompanhamento clicáveis |
-| **Exportar CSV** | Botão para baixar os dados retornados pela última consulta |
-| **Gráficos automáticos** | Barras ou linha, detectados automaticamente pelo tipo de dados |
-| **Rejeição de perguntas fora do escopo** | O agente identifica perguntas não relacionadas ao banco e responde diretamente sem consultar ferramentas |
+| `tests/test_tools.py` | Schema caching, SQL execution, LIMIT injection, cache de queries, bloqueio não-SELECT, JOINs |
+| `tests/test_llm.py` | Seleção de provider, labels, instanciação com mocks |
+| `tests/test_agent.py` | Build do agente, system prompt (schema-first, português, segurança), ferramentas registradas |
 
-## Sugestões de Melhorias Futuras
+---
 
-- **Autenticação de usuário** para ambientes multi-tenant.
-- **Testes automatizados** cobrindo as ferramentas e o fluxo do agente.
-- **Cache de resultados** para queries repetidas dentro da mesma sessão.
+## Estrutura do projeto
+
+```
+desafio-franq-ia/
+├── app.py                  # Interface Streamlit (UI principal)
+├── main.py                 # Smoke test via terminal
+├── requirements.txt        # Dependências Python
+├── .env.example            # Template de variáveis de ambiente
+│
+├── src/
+│   ├── agent.py            # Agente ReAct (LangGraph)
+│   ├── llm.py              # Fábrica de LLM (Gemini / Ollama)
+│   ├── tools.py            # Ferramentas: get_database_schema, execute_sql_query
+│   └── db_utils.py         # Conexão SQLite e utilitários de schema
+│
+├── tests/
+│   ├── test_agent.py       # Testes do agente
+│   ├── test_llm.py         # Testes do provedor de LLM
+│   └── test_tools.py       # Testes das ferramentas SQL
+│
+├── data/
+│   └── anexo_desafio_1.db  # Banco de dados SQLite (clientes, compras, suporte, campanhas)
+│
+└── scripts/
+    └── discover_models.py  # Utilitário: lista modelos Gemini disponíveis
+```
+
+### Banco de dados
+
+| Tabela | Colunas principais |
+|---|---|
+| `clientes` | id, nome, email, valor_total_gasto, data_ultima_compra, idade, cidade, estado, profissao, genero |
+| `compras` | id, cliente_id, data_compra, valor, categoria, canal |
+| `suporte` | id, cliente_id, data_contato, tipo_contato, resolvido, canal |
+| `campanhas_marketing` | id, cliente_id, nome_campanha, data_envio, interagiu, canal |
