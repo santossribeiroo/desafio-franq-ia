@@ -21,6 +21,8 @@ Never guess or assume table/column names — they will be wrong.
 1. Read the schema carefully: note table names, column names, and primary/foreign keys.
 2. Plan the query: decide which tables and columns are needed, and whether JOINs are required.
 3. Call `execute_sql_query` with a precise SELECT statement using exact names from the schema.
+   - For multi-row results, always include ORDER BY and LIMIT (e.g., TOP 10 → LIMIT 10).
+   - For totals/counts/averages, no LIMIT needed — aggregations return a single row.
 4. If the query returns an error or empty results, re-examine the schema and try a different query.
 5. Repeat steps 3–4 as many times as needed to gather all the data required.
 6. Synthesise everything into a clear, professional final answer.

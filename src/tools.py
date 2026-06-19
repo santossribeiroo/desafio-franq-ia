@@ -9,6 +9,9 @@ from src.db_utils import DB_PATH, format_schema_for_prompt, get_schema
 # for the entire process lifetime — avoids a redundant round-trip on every question.
 _schema_cache: str | None = None
 
+# Hard cap to prevent accidental full-table scans from overwhelming the UI
+_MAX_ROWS = 200
+
 
 @tool
 def get_database_schema() -> str:
@@ -35,7 +38,10 @@ def execute_sql_query(sql: str) -> str:
     if first_token != "SELECT":
         return "ERROR: Only SELECT statements are permitted."
 
-    # PRAGMA query_only enforces read-only at the SQLite engine level, cross-platform
+    # Automatically cap result size if the query has no LIMIT — prevents expensive full scans
+    if "LIMIT" not in sql.upper():
+        sql = f"{sql.rstrip('; ')} LIMIT {_MAX_ROWS}"
+
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
 
