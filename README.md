@@ -158,9 +158,19 @@ O modelo utilizado é o **Gemini 2.5 Flash** via `langchain-google-genai`, com t
 
 ---
 
-## Sugestões de Melhorias
+## Funcionalidades da Interface
 
-- **Memória conversacional** para perguntas de acompanhamento com contexto das interações anteriores.
-- **Validação adicional da query** com análise semântica antes da execução.
+| Funcionalidade | Descrição |
+|---|---|
+| **Raciocínio em tempo real** | Cada passo do agente aparece conforme acontece (schema, SQL, resultado) via `st.status()` |
+| **Memória conversacional** | O histórico completo de mensagens é mantido entre perguntas — o agente entende "e desse grupo, quais...?" |
+| **Perguntas sugeridas** | Após cada resposta, o agente gera 3 sugestões de perguntas de acompanhamento clicáveis |
+| **Exportar CSV** | Botão para baixar os dados retornados pela última consulta |
+| **Gráficos automáticos** | Barras ou linha, detectados automaticamente pelo tipo de dados |
+| **Rejeição de perguntas fora do escopo** | O agente identifica perguntas não relacionadas ao banco e responde diretamente sem consultar ferramentas |
+
+## Sugestões de Melhorias Futuras
+
 - **Autenticação de usuário** para ambientes multi-tenant.
-- **Testes automatizados** cobrindo os nós do grafo e as funções de leitura do banco.
+- **Testes automatizados** cobrindo as ferramentas e o fluxo do agente.
+- **Cache de resultados** para queries repetidas dentro da mesma sessão.

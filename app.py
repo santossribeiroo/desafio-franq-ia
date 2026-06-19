@@ -5,7 +5,8 @@ import plotly.express as px
 import sqlparse
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.agent import build_agent
 
@@ -26,13 +27,11 @@ st.markdown(
         font-family: 'Inter', sans-serif;
     }
 
-    /* ── Page background ── */
     .stApp {
         background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
         background-attachment: fixed;
     }
 
-    /* ── Fade-in on load ── */
     .main .block-container {
         animation: fadeUp 0.6s ease-out;
         padding-top: 2.5rem;
@@ -42,7 +41,6 @@ st.markdown(
         to   { opacity: 1; transform: translateY(0); }
     }
 
-    /* ── Hero title ── */
     h1 {
         font-size: 2.2rem !important;
         font-weight: 700 !important;
@@ -53,7 +51,6 @@ st.markdown(
         letter-spacing: -0.5px;
     }
 
-    /* ── Input field ── */
     div[data-testid="stTextInput"] input {
         background: rgba(255, 255, 255, 0.05) !important;
         border: 1.5px solid rgba(255, 255, 255, 0.12) !important;
@@ -73,14 +70,12 @@ st.markdown(
         color: rgba(255, 255, 255, 0.3) !important;
     }
 
-    /* ── Primary send button ── */
     div[data-testid="stButton"] button[kind="primary"] {
         background: linear-gradient(135deg, #3b82f6, #8b5cf6) !important;
         border: none !important;
         border-radius: 14px !important;
         font-weight: 600 !important;
         font-size: 1rem !important;
-        letter-spacing: 0.3px !important;
         padding: 0.65rem 1.5rem !important;
         transition: all 0.3s ease !important;
         box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3) !important;
@@ -90,11 +85,7 @@ st.markdown(
         box-shadow: 0 8px 25px rgba(59, 130, 246, 0.5) !important;
         filter: brightness(1.1) !important;
     }
-    div[data-testid="stButton"] button[kind="primary"]:active {
-        transform: translateY(0px) !important;
-    }
 
-    /* ── Tabs ── */
     .stTabs [data-baseweb="tab-list"] {
         background: rgba(255, 255, 255, 0.04) !important;
         border-radius: 12px !important;
@@ -112,29 +103,24 @@ st.markdown(
         color: #60a5fa !important;
     }
 
-    /* ── Code block (SQL) ── */
     .stCode, [data-testid="stCode"] {
         border-radius: 12px !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
     }
 
-    /* ── Alert boxes ── */
     div[data-testid="stAlert"] {
         border-radius: 12px !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
         backdrop-filter: blur(8px) !important;
     }
 
-    /* ── Divider ── */
     hr { border-color: rgba(255, 255, 255, 0.08) !important; }
 
-    /* ── Dataframe ── */
     [data-testid="stDataFrame"] {
         border-radius: 12px !important;
         overflow: hidden !important;
     }
 
-    /* ── Response card ── */
     .response-card {
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(255, 255, 255, 0.08);
@@ -146,25 +132,20 @@ st.markdown(
         line-height: 1.7;
     }
 
-    /* ── Reasoning step card ── */
-    .step-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.07);
-        border-left: 3px solid #60a5fa;
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-        margin-bottom: 0.75rem;
+    .suggestion-btn {
+        background: rgba(96, 165, 250, 0.08) !important;
+        border: 1px solid rgba(96, 165, 250, 0.2) !important;
+        border-radius: 10px !important;
+        color: #93c5fd !important;
+        font-size: 0.88rem !important;
+        text-align: left !important;
+        transition: all 0.2s ease !important;
     }
-    .step-label {
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.8px;
-        color: #60a5fa;
-        margin-bottom: 0.4rem;
+    .suggestion-btn:hover {
+        background: rgba(96, 165, 250, 0.15) !important;
+        border-color: rgba(96, 165, 250, 0.4) !important;
     }
 
-    /* ── History message bubbles ── */
     .msg-user {
         background: rgba(96, 165, 250, 0.1);
         border: 1px solid rgba(96, 165, 250, 0.2);
@@ -190,16 +171,24 @@ st.markdown(
 )
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 @st.cache_resource
 def get_agent():
     return build_agent()
 
 
-def run_agent(user_input: str) -> dict:
-    return get_agent().invoke({"messages": [("human", user_input)]})
+def _is_rate_limit_error(text: str) -> bool:
+    return "429" in text or "RESOURCE_EXHAUSTED" in text
 
 
-# Keywords that suggest a column represents a time axis
+def _extract_content(content) -> str:
+    """Normalise Gemini content — may be str or list of content blocks."""
+    if isinstance(content, list):
+        return " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return str(content) if content else ""
+
+
 _TEMPORAL_KEYWORDS = {"data", "date", "mes", "ano", "year", "month", "periodo", "semana", "week", "dia", "trimestre"}
 
 
@@ -207,78 +196,153 @@ def _detect_chart(df: pd.DataFrame) -> tuple[str, str, str] | None:
     """Return (x_col, y_col, chart_type) or None if no chart is appropriate."""
     if len(df) < 2:
         return None
-
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     text_cols = df.select_dtypes(exclude="number").columns.tolist()
-
     if not numeric_cols or not text_cols:
         return None
-
-    x_col = text_cols[0]
-    y_col = numeric_cols[0]
-
+    x_col, y_col = text_cols[0], numeric_cols[0]
     is_temporal = any(kw in x_col.lower() for kw in _TEMPORAL_KEYWORDS)
-    chart_type = "line" if is_temporal else "bar"
-
-    return x_col, y_col, chart_type
+    return x_col, y_col, "line" if is_temporal else "bar"
 
 
-def _is_rate_limit_error(text: str) -> bool:
-    return "429" in text or "RESOURCE_EXHAUSTED" in text
-
-
-def _parse_agent_result(result: dict) -> dict:
+def _get_follow_ups(question: str, response: str) -> list[str]:
     """
-    Extract the final answer, tool call steps, and last SQL dataset from the
-    ReAct agent's message list. Each AIMessage with tool_calls represents one
-    reasoning step; the subsequent ToolMessages carry the observations.
+    Generate 3 short follow-up questions using a lightweight LLM call.
+    Returns an empty list on any failure so the feature degrades gracefully.
     """
-    messages = result.get("messages", [])
+    try:
+        from langchain_core.messages import SystemMessage
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
+        result = llm.invoke([
+            SystemMessage(content=(
+                "Based on the conversation below, suggest exactly 3 short follow-up questions "
+                "the user might ask next, in Brazilian Portuguese. "
+                "Return only the questions, one per line, no numbering or bullets."
+            )),
+            HumanMessage(content=f"Pergunta: {question}\n\nResposta: {response[:500]}"),
+        ])
+        content = _extract_content(result.content)
+        return [q.strip() for q in content.strip().split("\n") if q.strip()][:3]
+    except Exception:  # noqa: BLE001
+        return []
 
-    final_response = ""
+
+# ── Streaming execution ───────────────────────────────────────────────────────
+
+def _run_with_streaming(messages: list) -> tuple[dict | None, list]:
+    """
+    Invoke the ReAct agent with streaming so each reasoning step appears in real
+    time inside an st.status() container. Returns (parsed_result, new_messages).
+
+    stream_mode="updates" gives one event per node execution, each containing
+    only the messages that node appended — perfect for incremental display.
+    """
+    agent = get_agent()
     tool_steps: list[dict] = []
+    pending: dict[str, dict] = {}   # tool_call_id → step dict for matching ToolMessages
     last_sql_rows: list[dict] = []
+    final_response = ""
+    new_messages: list = []
 
-    for i, msg in enumerate(messages):
-        if isinstance(msg, AIMessage):
-            if msg.tool_calls:
-                for tc in msg.tool_calls:
-                    # Match each tool call with its ToolMessage observation
-                    output = next(
-                        (m.content for m in messages[i + 1 :] if isinstance(m, ToolMessage) and m.tool_call_id == tc["id"]),
-                        "",
-                    )
-                    tool_steps.append({
-                        "tool": tc["name"],
-                        "args": tc["args"],
-                        "output": output,
-                    })
+    try:
+        with st.status("🧠 Analisando sua pergunta...", expanded=True) as status:
+            for event in agent.stream({"messages": messages}, stream_mode="updates"):
+                for _node, update in event.items():
+                    for msg in update.get("messages", []):
+                        new_messages.append(msg)
 
-                    # Keep the last successful SQL result for the chart / table
-                    if tc["name"] == "execute_sql_query" and output and not output.startswith("ERROR"):
-                        try:
-                            rows = json.loads(output)
-                            if isinstance(rows, list) and rows:
-                                last_sql_rows = rows
-                        except json.JSONDecodeError:
-                            pass
-            else:
-                # Final AIMessage has no tool_calls — this is the synthesised answer
-                content = msg.content
-                if isinstance(content, list):
-                    content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-                if content:
-                    final_response = content
+                        if isinstance(msg, AIMessage):
+                            if msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    step: dict = {"tool": tc["name"], "args": tc["args"], "output": ""}
+                                    tool_steps.append(step)
+                                    pending[tc["id"]] = step
+
+                                    if tc["name"] == "get_database_schema":
+                                        st.write("📋 Consultando estrutura do banco de dados...")
+                                    elif tc["name"] == "execute_sql_query":
+                                        sql = tc["args"].get("sql", "")
+                                        fmt = sqlparse.format(sql, reindent=True, keyword_case="upper", indent_width=4)
+                                        st.write("⚙️ Executando consulta SQL:")
+                                        st.code(fmt, language="sql")
+                            else:
+                                content = _extract_content(msg.content)
+                                if content:
+                                    final_response = content
+
+                        elif isinstance(msg, ToolMessage):
+                            step = pending.get(msg.tool_call_id)
+                            if step:
+                                step["output"] = msg.content
+
+                            is_error = msg.content.startswith("ERROR")
+                            is_schema = step and step["tool"] == "get_database_schema"
+
+                            if is_error:
+                                st.caption(f"⚠️ {msg.content[:180]}")
+                            elif is_schema:
+                                st.caption("✅ Schema obtido com sucesso")
+                            else:
+                                try:
+                                    rows = json.loads(msg.content)
+                                    if isinstance(rows, list) and rows:
+                                        last_sql_rows = rows
+                                        st.caption(f"✅ {len(rows)} registro(s) retornado(s)")
+                                    else:
+                                        st.caption(f"✅ {msg.content[:120]}")
+                                except json.JSONDecodeError:
+                                    st.caption(f"✅ {msg.content[:120]}")
+
+            label = "✅ Análise concluída!" if final_response else "⚠️ Análise finalizada sem resposta"
+            status.update(label=label, state="complete", expanded=False)
+
+    except Exception as exc:  # noqa: BLE001
+        if _is_rate_limit_error(str(exc)):
+            st.warning(
+                "⚠️ **Limite de requisições atingido temporariamente.**\n\n"
+                "Estamos na camada gratuita da API Gemini. "
+                "Aguarde **30 a 60 segundos** e tente novamente."
+            )
+        else:
+            st.error(f"Ocorreu um erro inesperado.\n\n`{exc}`")
+        return None, new_messages
 
     return {
         "final_response": final_response,
         "tool_steps": tool_steps,
         "last_sql_rows": last_sql_rows,
-    }
+    }, new_messages
+
+
+# ── Result rendering ──────────────────────────────────────────────────────────
+
+def _render_chart(df: pd.DataFrame) -> None:
+    chart = _detect_chart(df)
+    if not chart:
+        return
+    x_col, y_col, chart_type = chart
+    st.divider()
+    st.caption("📊 Visualização dos dados")
+
+    layout = dict(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=30, b=0),
+        font=dict(family="Inter"),
+    )
+    if chart_type == "line":
+        fig = px.line(df, x=x_col, y=y_col, template="plotly_dark", markers=True)
+        fig.update_traces(line=dict(color="#60a5fa", width=2.5))
+    else:
+        fig = px.bar(df, x=x_col, y=y_col, template="plotly_dark", color=y_col, color_continuous_scale="Blues")
+        layout["coloraxis_showscale"] = False
+
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_result(agent_output: dict) -> None:
-    """Render result tabs for a single agent invocation."""
+    """Render the polished response + reasoning tabs after streaming completes."""
     final_response = agent_output["final_response"]
     tool_steps = agent_output["tool_steps"]
     last_sql_rows = agent_output["last_sql_rows"]
@@ -291,40 +355,30 @@ def _render_result(agent_output: dict) -> None:
                 f'<div class="response-card">{final_response}</div>',
                 unsafe_allow_html=True,
             )
-
-            if last_sql_rows:
-                df = pd.DataFrame(last_sql_rows)
-                chart = _detect_chart(df)
-                if chart:
-                    x_col, y_col, chart_type = chart
-                    st.divider()
-                    st.caption("📊 Visualização dos dados")
-
-                    common_layout = dict(
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        margin=dict(l=0, r=0, t=30, b=0),
-                        font=dict(family="Inter"),
-                    )
-
-                    if chart_type == "line":
-                        fig = px.line(df, x=x_col, y=y_col, template="plotly_dark", markers=True, hover_data=df.columns.tolist())
-                        fig.update_traces(line=dict(color="#60a5fa", width=2.5))
-                    else:
-                        fig = px.bar(df, x=x_col, y=y_col, template="plotly_dark", color=y_col, color_continuous_scale="Blues", hover_data=df.columns.tolist())
-                        common_layout["coloraxis_showscale"] = False
-
-                    fig.update_layout(**common_layout)
-                    st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Nenhuma resposta foi gerada para esta pergunta.")
 
+        if last_sql_rows:
+            df = pd.DataFrame(last_sql_rows)
+            _render_chart(df)
+            st.divider()
+
+            # CSV export
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="⬇️ Exportar dados como CSV",
+                data=csv_bytes,
+                file_name="resultado.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
     with tab_reasoning:
         if not tool_steps:
-            st.info("Nenhuma ação foi registrada.")
+            st.info("Nenhuma ferramenta foi utilizada (pergunta respondida sem consultar o banco).")
             return
 
-        st.caption(f"O agente executou **{len(tool_steps)}** ação(ões) para responder sua pergunta.")
+        st.caption(f"O agente executou **{len(tool_steps)}** ação(ões).")
         st.divider()
 
         for idx, step in enumerate(tool_steps, 1):
@@ -333,18 +387,14 @@ def _render_result(agent_output: dict) -> None:
             output = step["output"]
 
             if tool_name == "get_database_schema":
-                with st.expander(f"**Passo {idx} — Consultar estrutura do banco de dados**", expanded=False):
-                    st.markdown('<div class="step-label">🗂️ Ferramenta: get_database_schema</div>', unsafe_allow_html=True)
+                with st.expander(f"**Passo {idx} — Consultar estrutura do banco**", expanded=False):
                     st.code(output, language="text")
 
             elif tool_name == "execute_sql_query":
                 sql = args.get("sql", "")
-                formatted_sql = sqlparse.format(sql, reindent=True, keyword_case="upper", indent_width=4)
-
+                fmt_sql = sqlparse.format(sql, reindent=True, keyword_case="upper", indent_width=4)
                 with st.expander(f"**Passo {idx} — Executar consulta SQL**", expanded=True):
-                    st.markdown('<div class="step-label">⚙️ Ferramenta: execute_sql_query</div>', unsafe_allow_html=True)
-                    st.code(formatted_sql, language="sql")
-
+                    st.code(fmt_sql, language="sql")
                     if output.startswith("ERROR"):
                         st.error(output)
                     else:
@@ -353,47 +403,58 @@ def _render_result(agent_output: dict) -> None:
                             if isinstance(rows, list) and rows:
                                 df_step = pd.DataFrame(rows)
                                 st.dataframe(df_step, use_container_width=True, hide_index=True)
-                                st.caption(f"{len(df_step)} registro(s) retornado(s)")
+                                st.caption(f"{len(df_step)} registro(s)")
                             else:
                                 st.info(output)
                         except json.JSONDecodeError:
                             st.text(output)
 
-            else:
-                with st.expander(f"**Passo {idx} — {tool_name}**", expanded=False):
-                    st.json(args)
-                    st.text(output)
-
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+if "conversation_messages" not in st.session_state:
+    # Preserves the full message history across questions for conversational memory
+    st.session_state.conversation_messages: list = []
 
-# ── Sidebar — conversation history ────────────────────────────────────────────
+if "history" not in st.session_state:
+    st.session_state.history: list = []  # sidebar display: [{question, response}]
+
+if "follow_ups" not in st.session_state:
+    st.session_state.follow_ups: list[str] = []
+
+if "auto_question" not in st.session_state:
+    st.session_state.auto_question = ""
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.markdown("## 🗂️ Histórico")
-    st.caption("Perguntas desta sessão")
+
+    ctx_count = len([m for m in st.session_state.conversation_messages if isinstance(m, HumanMessage)])
+    if ctx_count > 0:
+        st.caption(f"🧠 **{ctx_count}** pergunta(s) em memória — o agente tem contexto de toda a sessão.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Limpar", use_container_width=True, help="Apaga histórico e memória"):
+                st.session_state.conversation_messages = []
+                st.session_state.history = []
+                st.session_state.follow_ups = []
+                st.rerun()
+    else:
+        st.info("Nenhuma consulta realizada ainda.")
 
     if st.session_state.history:
-        if st.button("🗑️ Limpar histórico", use_container_width=True):
-            st.session_state.history = []
-            st.rerun()
-
         st.divider()
-
         for entry in reversed(st.session_state.history):
             label = entry["question"][:55] + "..." if len(entry["question"]) > 55 else entry["question"]
             with st.expander(f"**{label}**"):
                 st.markdown(entry["response"])
-    else:
-        st.info("Nenhuma consulta realizada ainda.")
 
 # ── Page header ───────────────────────────────────────────────────────────────
 
 st.title("💹 Assistente Virtual de Dados")
-st.caption("Faça perguntas em português sobre os dados da FRANQ e receba respostas instantâneas.")
+st.caption("Faça perguntas em português sobre os dados da FRANQ. O agente mantém contexto entre perguntas.")
 
 st.divider()
 
@@ -403,9 +464,17 @@ question = st.text_input(
     label="Sua pergunta",
     placeholder="Ex: Quais campanhas de marketing tiveram interação dos clientes?",
     label_visibility="collapsed",
+    key="question_input",
 )
 
 submitted = st.button("Enviar", type="primary", use_container_width=True)
+
+# A follow-up suggestion button sets auto_question and triggers a rerun;
+# on this rerun we treat it the same as a normal submission.
+if st.session_state.auto_question:
+    question = st.session_state.auto_question
+    st.session_state.auto_question = ""
+    submitted = True
 
 # ── Agent execution ───────────────────────────────────────────────────────────
 
@@ -413,27 +482,40 @@ if submitted:
     if not question.strip():
         st.warning("Por favor, digite uma pergunta antes de enviar.")
     else:
-        try:
-            with st.spinner("Analisando e consultando os dados..."):
-                raw_result = run_agent(question.strip())
-        except Exception as exc:  # noqa: BLE001 — catch-all needed at UI boundary
-            if _is_rate_limit_error(str(exc)):
-                st.warning(
-                    "⚠️ **Limite de requisições atingido temporariamente.**\n\n"
-                    "Estamos na camada gratuita da API Gemini. "
-                    "Aguarde **30 a 40 segundos** e tente novamente."
-                )
-            else:
-                st.error(f"Ocorreu um erro inesperado. Tente novamente.\n\n`{exc}`")
-            st.stop()
+        st.session_state.follow_ups = []  # clear stale suggestions
 
-        parsed = _parse_agent_result(raw_result)
+        # Append new question to the full conversation history
+        messages_in = st.session_state.conversation_messages + [HumanMessage(content=question.strip())]
 
         st.divider()
-        _render_result(parsed)
+        agent_output, new_messages = _run_with_streaming(messages_in)
 
-        response_text = parsed["final_response"]
-        if response_text and not _is_rate_limit_error(response_text):
-            st.session_state.history.append(
-                {"question": question.strip(), "response": response_text}
-            )
+        if agent_output is not None:
+            # Persist the complete updated history (enables follow-up context)
+            st.session_state.conversation_messages = messages_in + new_messages
+
+            _render_result(agent_output)
+
+            response_text = agent_output["final_response"]
+
+            if response_text and not _is_rate_limit_error(response_text):
+                st.session_state.history.append(
+                    {"question": question.strip(), "response": response_text}
+                )
+
+                # Generate follow-up suggestions (degrades gracefully on quota errors)
+                follow_ups = _get_follow_ups(question.strip(), response_text)
+                if follow_ups:
+                    st.session_state.follow_ups = follow_ups
+
+# ── Follow-up suggestions ─────────────────────────────────────────────────────
+
+if st.session_state.follow_ups:
+    st.divider()
+    st.caption("💡 **Perguntas sugeridas** — clique para enviar:")
+    cols = st.columns(len(st.session_state.follow_ups))
+    for i, suggestion in enumerate(st.session_state.follow_ups):
+        with cols[i]:
+            if st.button(suggestion, key=f"suggestion_{i}", use_container_width=True):
+                st.session_state.auto_question = suggestion
+                st.rerun()
