@@ -1,11 +1,20 @@
-# Chaves e Credenciais de IA (Segurança)
-*.json
+# ── Credentials & secrets ─────────────────────────────────────────────────────
+.env
 gcp-credentials.json
+*.json
+
+# ── Runtime data (session history, feedback log) ──────────────────────────────
+data/session.json
+data/feedback.json
+
+# ── Python ────────────────────────────────────────────────────────────────────
 venv/
 env/
 .venv/
-.env
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
 .cursor/
-.cursorrules

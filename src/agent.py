@@ -1,7 +1,16 @@
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.prebuilt import create_react_agent
+import warnings
 
+from dotenv import load_dotenv
+
+# langgraph.prebuilt.create_react_agent is deprecated in LangGraph v1.0 (to be
+# removed in v2.0) but langchain.agents.create_agent uses a different execution
+# model that does NOT enforce the ReAct tool-calling loop we need here.
+# We keep the LangGraph version and suppress the deprecation noise.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    from langgraph.prebuilt import create_react_agent
+
+from src.llm import get_llm
 from src.tools import execute_sql_query, get_database_schema
 
 load_dotenv()
@@ -20,9 +29,9 @@ Never guess or assume table/column names — they will be wrong.
 
 1. Read the schema carefully: note table names, column names, and primary/foreign keys.
 2. Plan the query: decide which tables and columns are needed, and whether JOINs are required.
-3. Call `execute_sql_query` with a precise SELECT statement using exact names from the schema.
    - For multi-row results, always include ORDER BY and LIMIT (e.g., TOP 10 → LIMIT 10).
    - For totals/counts/averages, no LIMIT needed — aggregations return a single row.
+3. Call `execute_sql_query` with a precise SELECT statement using exact names from the schema.
 4. If the query returns an error or empty results, re-examine the schema and try a different query.
 5. Repeat steps 3–4 as many times as needed to gather all the data required.
 6. Synthesise everything into a clear, professional final answer.
@@ -40,7 +49,7 @@ The conversation history is included. Use it to understand follow-up questions s
 "e desse grupo, quais compraram mais?" — always refer back to the previous query context.
 
 ## Output rules:
-- Always respond in **Brazilian Portuguese (pt-BR)**.
+- CRITICAL: Always respond EXCLUSIVELY in **Brazilian Portuguese (pt-BR)**. Never use any other language.
 - Format currency as R$ with 2 decimal places (e.g., R$ 1.234,56).
 - Use bullet points or numbered lists when presenting multiple items.
 - Do NOT mention SQL, databases, tables, or any technical implementation detail in the final answer.
@@ -52,8 +61,10 @@ The conversation history is included. Use it to understand follow-up questions s
 
 
 def build_agent():
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    llm = get_llm(temperature=0)
     tools = [get_database_schema, execute_sql_query]
-    # create_react_agent builds a LangGraph graph with a ReAct loop:
-    # the LLM reasons → calls tools → observes results → reasons again → until it has the final answer
-    return create_react_agent(llm, tools, prompt=_SYSTEM_PROMPT)
+    # version="v1" uses the classic strict ReAct loop where the model alternates
+    # between tool calls and observations until it produces a final text answer.
+    # version="v2" (LangGraph 1.x default) is more flexible but less predictable
+    # with smaller models like qwen2.5:14b that tend to skip tool calls.
+    return create_react_agent(llm, tools, prompt=_SYSTEM_PROMPT, version="v1")

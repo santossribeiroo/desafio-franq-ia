@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -9,10 +10,10 @@ import sqlparse
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.agent import build_agent
 from src.db_utils import DB_PATH, get_schema
+from src.llm import get_llm, get_provider_label, is_local_provider
 
 load_dotenv()
 
@@ -30,14 +31,19 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
     background-attachment: fixed;
 }
-.main .block-container { animation: fadeUp 0.6s ease-out; padding-top: 2.5rem; }
-@keyframes fadeUp { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+.main .block-container {
+    animation: fadeUp 0.5s ease-out;
+    padding-top: 2rem;
+    max-width: 860px;
+}
+@keyframes fadeUp { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
 h1 {
-    font-size: 2.2rem !important; font-weight: 700 !important;
+    font-size: 2rem !important; font-weight: 700 !important;
     background: linear-gradient(90deg,#60a5fa,#a78bfa,#f472b6);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    background-clip: text; letter-spacing: -0.5px;
+    background-clip: text; letter-spacing: -0.5px; margin-bottom: 0.25rem !important;
 }
+/* ── Input ── */
 div[data-testid="stTextInput"] input {
     background:rgba(255,255,255,0.05)!important; border:1.5px solid rgba(255,255,255,0.12)!important;
     border-radius:14px!important; padding:14px 18px!important; font-size:1rem!important;
@@ -48,38 +54,61 @@ div[data-testid="stTextInput"] input:focus {
     background:rgba(255,255,255,0.08)!important;
 }
 div[data-testid="stTextInput"] input::placeholder { color:rgba(255,255,255,0.3)!important; }
+/* ── Primary button ── */
 div[data-testid="stButton"] button[kind="primary"] {
     background:linear-gradient(135deg,#3b82f6,#8b5cf6)!important; border:none!important;
-    border-radius:14px!important; font-weight:600!important; padding:0.65rem 1.5rem!important;
-    transition:all 0.3s ease!important; box-shadow:0 4px 15px rgba(59,130,246,0.3)!important;
+    border-radius:14px!important; font-weight:600!important; padding:0.7rem 1.5rem!important;
+    transition:all 0.25s ease!important; box-shadow:0 4px 15px rgba(59,130,246,0.3)!important;
 }
 div[data-testid="stButton"] button[kind="primary"]:hover {
     transform:translateY(-2px)!important; box-shadow:0 8px 25px rgba(59,130,246,0.5)!important;
 }
+/* ── Secondary buttons (welcome cards, suggestions) ── */
+div[data-testid="stButton"] button[kind="secondary"] {
+    background:rgba(255,255,255,0.04)!important;
+    border:1px solid rgba(255,255,255,0.1)!important;
+    border-radius:12px!important; font-size:0.85rem!important;
+    color:#cbd5e1!important; transition:all 0.2s ease!important;
+    white-space:normal!important; text-align:left!important;
+}
+div[data-testid="stButton"] button[kind="secondary"]:hover {
+    background:rgba(96,165,250,0.08)!important;
+    border-color:rgba(96,165,250,0.3)!important;
+    color:#e2e8f0!important;
+}
+/* ── Tabs ── */
 .stTabs [data-baseweb="tab-list"] {
     background:rgba(255,255,255,0.04)!important; border-radius:12px!important;
     padding:4px!important; border:1px solid rgba(255,255,255,0.08)!important; gap:4px!important;
 }
 .stTabs [data-baseweb="tab"] { border-radius:9px!important; font-weight:500!important; }
 .stTabs [aria-selected="true"] { background:rgba(96,165,250,0.15)!important; color:#60a5fa!important; }
+/* ── Misc elements ── */
 .stCode,[data-testid="stCode"] { border-radius:12px!important; border:1px solid rgba(255,255,255,0.08)!important; }
 div[data-testid="stAlert"] { border-radius:12px!important; border:1px solid rgba(255,255,255,0.08)!important; }
-hr { border-color:rgba(255,255,255,0.08)!important; }
+hr { border-color:rgba(255,255,255,0.07)!important; margin:0.75rem 0!important; }
 [data-testid="stDataFrame"] { border-radius:12px!important; overflow:hidden!important; }
+/* ── Response card ── */
 .response-card {
     background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
     border-radius:16px; padding:1.5rem 1.75rem; backdrop-filter:blur(12px);
     box-shadow:0 8px 32px rgba(0,0,0,0.2); animation:fadeUp 0.4s ease-out; line-height:1.7;
+    font-size:0.97rem;
 }
-.example-card {
-    background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08);
-    border-radius:14px; padding:1rem 1.2rem; transition:all 0.2s ease; cursor:pointer;
-}
-.example-card:hover { background:rgba(96,165,250,0.08); border-color:rgba(96,165,250,0.25); }
+/* ── Metrics row — rendered as a single HTML block to avoid empty-div artefacts ── */
 .metric-row {
     background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);
-    border-radius:12px; padding:0.6rem 1rem; margin-top:0.75rem;
+    border-radius:12px; padding:1rem 1.5rem; margin-top:0.25rem;
+    display:grid; grid-template-columns:repeat(4,1fr); gap:0.5rem;
 }
+.metric-item { text-align:center; }
+.metric-label {
+    font-size:0.70rem; color:#94a3b8; text-transform:uppercase;
+    letter-spacing:0.06em; margin-bottom:6px;
+}
+.metric-value { font-size:1.55rem; font-weight:700; color:#e2e8f0; line-height:1.1; }
+.metric-value.good { color:#34d399; }
+.metric-value.zero { color:#475569; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -221,7 +250,7 @@ def _maybe_summarize_context(messages: list) -> list:
         return recent
 
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        llm = get_llm(temperature=0)
         result = llm.invoke([
             SystemMessage(content="Resuma este histórico de conversa de forma concisa em português, mantendo os fatos e números-chave."),
             HumanMessage(content="\n".join(digest_lines)),
@@ -236,7 +265,7 @@ def _maybe_summarize_context(messages: list) -> list:
 def _get_follow_ups(question: str, response: str) -> list[str]:
     """Generate 3 follow-up suggestions. Returns [] on any failure."""
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
+        llm = get_llm(temperature=0.7)
         result = llm.invoke([
             SystemMessage(content="Based on the conversation, suggest exactly 3 short follow-up questions in Brazilian Portuguese. One per line, no numbering."),
             HumanMessage(content=f"Pergunta: {question}\n\nResposta: {response[:500]}"),
@@ -260,14 +289,18 @@ def _extract_token_usage(messages: list) -> dict[str, int]:
 # ── Data analysis helpers ─────────────────────────────────────────────────────
 
 def _build_column_config(df: pd.DataFrame) -> dict:
+    """
+    Build column config for st.dataframe. Currency columns are expected to
+    already be pre-formatted as strings by _build_display_df, so they get a
+    TextColumn here. Non-currency numerics get a plain NumberColumn.
+    """
     config = {}
-    for col in df.select_dtypes(include="number").columns:
-        is_currency = any(kw in col.lower() for kw in _CURRENCY_KW)
-        config[col] = (
-            st.column_config.NumberColumn(col, format="R$ %.2f")
-            if is_currency
-            else st.column_config.NumberColumn(col)
-        )
+    for col in df.columns:
+        if col in df.select_dtypes(include="number").columns:
+            config[col] = st.column_config.NumberColumn(col, format="%.2f")
+        elif any(kw in col.lower() for kw in _CURRENCY_KW):
+            # Pre-formatted string currency column
+            config[col] = st.column_config.TextColumn(col)
     return config
 
 
@@ -286,6 +319,51 @@ def _detect_outliers(df: pd.DataFrame) -> list[str]:
         if count:
             notes.append(f"⚠️ `{col}`: {count} valor(es) fora do padrão detectado(s) (método IQR)")
     return notes
+
+
+def _clean_response(text: str) -> str:
+    """
+    Convert LaTeX math notation to readable plain text.
+    Local LLMs (Ollama) sometimes output raw LaTeX in their responses.
+    """
+    # \frac{a}{b} → a/b
+    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', text)
+    # Common math operators
+    text = text.replace(r'\times', '×').replace(r'\cdot', '·')
+    text = text.replace(r'\approx', '≈').replace(r'\geq', '≥').replace(r'\leq', '≤')
+    # Inline math delimiters \( ... \)
+    text = re.sub(r'\\\(|\\\)', '', text)
+    # $...$ inline delimiters (but not $$)
+    text = re.sub(r'(?<!\$)\$(?!\$)', '', text)
+    # Remaining backslash commands (e.g. \text, \sum, \pm)
+    text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
+    text = re.sub(r'\\[a-zA-Z]+', '', text)
+    return text.strip()
+
+
+def _format_brl(value) -> str:
+    """
+    Format a numeric value as Brazilian currency: R$ 1.234,56
+    Swaps US-style separators (1,234.56) to Brazilian (1.234,56).
+    """
+    try:
+        us = f"{float(value):,.2f}"          # "1,234.56"
+        br = us.replace(",", "§").replace(".", ",").replace("§", ".")  # "1.234,56"
+        return f"R$ {br}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _build_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a display copy of the DataFrame with currency columns pre-formatted
+    as Brazilian strings. Numeric-only columns keep their type for sorting.
+    """
+    out = df.copy()
+    for col in df.select_dtypes(include="number").columns:
+        if any(kw in col.lower() for kw in _CURRENCY_KW):
+            out[col] = df[col].apply(lambda v: _format_brl(v) if pd.notna(v) else "")
+    return out
 
 
 def _export_conversation_md() -> str:
@@ -337,7 +415,7 @@ def _run_with_streaming(messages: list) -> tuple[dict | None, list, bool]:
                             else:
                                 content = _extract_content(msg.content)
                                 if content:
-                                    final_response = content
+                                    final_response = _clean_response(content)
 
                         elif isinstance(msg, ToolMessage):
                             step = pending.get(msg.tool_call_id)
@@ -358,8 +436,17 @@ def _run_with_streaming(messages: list) -> tuple[dict | None, list, bool]:
                                 except json.JSONDecodeError:
                                     st.caption(f"✅ {msg.content[:120]}")
 
-            label = "✅ Análise concluída!" if final_response else "⚠️ Análise finalizada"
-            status.update(label=label, state="complete", expanded=False)
+            has_tools = bool(tool_steps)
+            if final_response:
+                label = (
+                    f"✅ Análise concluída — {len(tool_steps)} etapa(s) executada(s) ▾"
+                    if has_tools
+                    else "✅ Resposta direta (sem consulta ao banco)"
+                )
+            else:
+                label = "⚠️ Análise finalizada sem resposta"
+            # Keep expanded when tools were used so the user sees the reasoning steps
+            status.update(label=label, state="complete", expanded=has_tools)
 
     except Exception as exc:  # noqa: BLE001
         was_limited = _is_rate_limit_error(str(exc))
@@ -467,7 +554,14 @@ def _render_chart(df: pd.DataFrame, result_key: str = "chart") -> None:
         return
 
     fig.update_layout(**common_layout)
-    st.plotly_chart(fig, use_container_width=True)
+    # Disable select/lasso tools — they trigger Streamlit reruns that clear the page.
+    # Keep zoom/pan/hover which are the useful interactions.
+    plotly_config = {
+        "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
+        "displaylogo": False,
+        "scrollZoom": False,
+    }
+    st.plotly_chart(fig, use_container_width=True, config=plotly_config)
 
 
 def _render_stats(df: pd.DataFrame) -> None:
@@ -505,13 +599,41 @@ def _render_feedback(question: str, response: str, response_idx: int) -> None:
 
 def _render_metrics(elapsed: float, tool_steps: list, new_messages: list) -> None:
     tokens = _extract_token_usage(new_messages)
-    st.markdown('<div class="metric-row">', unsafe_allow_html=True)
-    cols = st.columns(4)
-    cols[0].metric("⏱️ Tempo", f"{elapsed:.1f}s")
-    cols[1].metric("🔧 Ferramentas", len(tool_steps))
-    cols[2].metric("🗄️ Queries SQL", sum(1 for s in tool_steps if s["tool"] == "execute_sql_query"))
-    cols[3].metric("🪙 Tokens", f"{tokens['total']:,}" if tokens["total"] else "—")
-    st.markdown("</div>", unsafe_allow_html=True)
+    sql_count = sum(1 for s in tool_steps if s["tool"] == "execute_sql_query")
+    tool_count = len(tool_steps)
+
+    if is_local_provider():
+        token_label = "🖥️ Tokens (local)"
+        token_display = f"{tokens['total']:,}" if tokens["total"] else "—"
+        token_title = "Processado localmente — sem custo de API"
+    else:
+        token_label = "🪙 Tokens"
+        token_display = f"{tokens['total']:,}" if tokens["total"] else "—"
+        token_title = "Tokens consumidos via API Gemini"
+
+    # Colour-code values: green for non-zero counts, muted for zeros
+    def _cls(val): return "good" if val and val != "—" and str(val) != "0" else "zero"
+
+    st.markdown(f"""
+    <div class="metric-row">
+        <div class="metric-item">
+            <div class="metric-label">⏱️ Tempo</div>
+            <div class="metric-value good">{elapsed:.1f}s</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">🔧 Ferramentas</div>
+            <div class="metric-value {_cls(tool_count)}">{tool_count}</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">🗄️ Queries SQL</div>
+            <div class="metric-value {_cls(sql_count)}">{sql_count}</div>
+        </div>
+        <div class="metric-item" title="{token_title}">
+            <div class="metric-label">{token_label}</div>
+            <div class="metric-value {_cls(token_display)}">{token_display}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def _render_result(agent_output: dict, question: str, response_idx: int) -> None:
@@ -531,11 +653,12 @@ def _render_result(agent_output: dict, question: str, response_idx: int) -> None
 
         if last_sql_rows:
             df = pd.DataFrame(last_sql_rows)
+            df_display = _build_display_df(df)  # currency cols pre-formatted as Brazilian strings
 
-            # Chart with type selector (all 4 options available)
+            # Chart uses original numeric df (not the formatted display copy)
             _render_chart(df, result_key=str(response_idx))
 
-            # Statistical summary
+            # Statistical summary (uses original numeric df)
             _render_stats(df)
 
             # Outlier notes
@@ -543,7 +666,7 @@ def _render_result(agent_output: dict, question: str, response_idx: int) -> None
                 st.caption(note)
 
             st.divider()
-            st.dataframe(df, use_container_width=True, hide_index=True, column_config=_build_column_config(df))
+            st.dataframe(df_display, use_container_width=True, hide_index=True, column_config=_build_column_config(df_display))
             st.caption(f"{len(df)} registro(s) — clique nas colunas para ordenar")
 
             csv_bytes = df.to_csv(index=False).encode("utf-8")
@@ -585,10 +708,11 @@ if "session_loaded" not in st.session_state:
     saved = _load_session()
     st.session_state.history: list = saved.get("history", [])
     st.session_state.feedback: dict = {int(k): v for k, v in saved.get("feedback", {}).items()}
-    # Reconstruct agent memory from saved Q&A pairs so follow-ups work after refresh
     st.session_state.conversation_messages: list = _rebuild_memory(st.session_state.history)
     st.session_state.follow_ups: list[str] = []
     st.session_state.auto_question: str = ""
+    # Persists the last agent result across reruns (e.g. chart type toggle, zoom interactions)
+    st.session_state.last_result: dict | None = None
     st.session_state.session_loaded = True
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -604,6 +728,7 @@ with st.sidebar:
             st.session_state.history = []
             st.session_state.follow_ups = []
             st.session_state.feedback = {}
+            st.session_state.last_result = None
             _save_session()
             st.rerun()
     else:
@@ -654,22 +779,26 @@ with st.sidebar:
 # ── Page header ───────────────────────────────────────────────────────────────
 
 st.title("💹 Assistente Virtual de Dados")
-st.caption("Faça perguntas em português sobre os dados da FRANQ. O agente mantém contexto entre perguntas.")
+st.markdown(
+    f'<p style="color:#94a3b8;font-size:0.9rem;margin-top:-0.5rem;margin-bottom:0">'
+    f'Faça perguntas em português sobre os dados da FRANQ. '
+    f'<span style="color:#60a5fa;font-weight:500">{get_provider_label()}</span></p>',
+    unsafe_allow_html=True,
+)
 st.divider()
 
 # ── Welcome screen (only when no history) ────────────────────────────────────
 
 if not st.session_state.history:
-    st.markdown("#### 🚀 Comece com um exemplo")
+    st.markdown('<p style="font-weight:600;font-size:1rem;margin-bottom:0.75rem">🚀 Comece com um exemplo</p>', unsafe_allow_html=True)
     cols = st.columns(3)
     for i, ex in enumerate(_EXAMPLES[:3]):
         with cols[i]:
-            st.markdown(
-                f'<div class="example-card"><strong>{ex["icon"]} {ex["title"]}</strong>'
-                f'<br><small style="color:#94a3b8">{ex["q"]}</small></div>',
-                unsafe_allow_html=True,
-            )
-            if st.button("Enviar", key=f"welcome_{i}", use_container_width=True):
+            if st.button(
+                f"{ex['icon']} {ex['title']}\n\n_{ex['q']}_",
+                key=f"welcome_{i}",
+                use_container_width=True,
+            ):
                 st.session_state.auto_question = ex["q"]
                 st.rerun()
     st.divider()
@@ -690,15 +819,16 @@ if st.session_state.auto_question:
     submitted = True
 
 # ── Agent execution ───────────────────────────────────────────────────────────
+# Only runs when the user submits a new question. Results are stored in
+# session_state.last_result so they survive reruns from chart interactions.
 
 if submitted:
     if not question.strip():
         st.warning("Por favor, digite uma pergunta antes de enviar.")
     else:
         st.session_state.follow_ups = []
+        st.session_state.last_result = None   # clear previous result while processing
         messages_in = st.session_state.conversation_messages + [HumanMessage(content=question.strip())]
-
-        # Summarise old context if the conversation is getting long
         messages_in = _maybe_summarize_context(messages_in)
 
         st.divider()
@@ -710,16 +840,34 @@ if submitted:
             st.session_state.conversation_messages = messages_in + new_messages
 
             response_idx = len(st.session_state.history)
-            _render_result(agent_output, question.strip(), response_idx)
-            _render_metrics(elapsed, agent_output["tool_steps"], new_messages)
+            # Persist so reruns (chart toggle, zoom, scroll) don't lose the results
+            st.session_state.last_result = {
+                "agent_output": agent_output,
+                "question": question.strip(),
+                "response_idx": response_idx,
+                "elapsed": elapsed,
+                "new_messages": new_messages,
+            }
 
             response_text = agent_output["final_response"]
             if response_text and not _is_rate_limit_error(response_text):
-                st.session_state.history.append({"question": question.strip(), "response": response_text})
-                _save_session()
+                last_q = st.session_state.history[-1]["question"] if st.session_state.history else None
+                if question.strip() != last_q:
+                    st.session_state.history.append({"question": question.strip(), "response": response_text})
+                    _save_session()
                 follow_ups = _get_follow_ups(question.strip(), response_text)
                 if follow_ups:
                     st.session_state.follow_ups = follow_ups
+
+# ── Always render last result (persists across chart-toggle / zoom reruns) ────
+
+if st.session_state.get("last_result"):
+    lr = st.session_state.last_result
+    # Only add divider if not already rendered inline during the submitted run above
+    if not submitted:
+        st.divider()
+    _render_result(lr["agent_output"], lr["question"], lr["response_idx"])
+    _render_metrics(lr["elapsed"], lr["agent_output"]["tool_steps"], lr["new_messages"])
 
 # ── Follow-up suggestions ─────────────────────────────────────────────────────
 
