@@ -323,21 +323,40 @@ def _detect_outliers(df: pd.DataFrame) -> list[str]:
 
 def _clean_response(text: str) -> str:
     """
-    Convert LaTeX math notation to readable plain text.
-    Local LLMs (Ollama) sometimes output raw LaTeX in their responses.
+    Sanitise the raw LLM output before displaying it:
+    1. Strip lines that are predominantly non-Latin characters (Thai, Cyrillic,
+       CJK, etc.). Small local models sometimes reason in another language before
+       switching to Portuguese — we want only the Portuguese output.
+    2. Convert LaTeX math notation to readable plain text.
     """
-    # \frac{a}{b} → a/b
+    # ── Step 1: remove non-Latin lines ────────────────────────────────────────
+    # Characters in these Unicode blocks are never part of Portuguese text.
+    _NON_LATIN = re.compile(
+        r'[\u0400-\u04FF'   # Cyrillic (Russian, Bulgarian, etc.)
+        r'\u0E00-\u0E7F'   # Thai
+        r'\u3000-\u9FFF'   # CJK / Japanese / Korean
+        r'\uAC00-\uD7AF'   # Hangul
+        r'\u0600-\u06FF'   # Arabic
+        r'\u0900-\u097F]'  # Devanagari (Hindi)
+    )
+    clean_lines = []
+    for line in text.split('\n'):
+        non_latin = len(_NON_LATIN.findall(line))
+        # Skip if more than 20 % of the line's characters are non-Latin
+        if len(line) > 0 and non_latin / len(line) > 0.20:
+            continue
+        clean_lines.append(line)
+    text = '\n'.join(clean_lines).strip()
+
+    # ── Step 2: LaTeX cleanup ──────────────────────────────────────────────────
     text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', text)
-    # Common math operators
     text = text.replace(r'\times', '×').replace(r'\cdot', '·')
     text = text.replace(r'\approx', '≈').replace(r'\geq', '≥').replace(r'\leq', '≤')
-    # Inline math delimiters \( ... \)
     text = re.sub(r'\\\(|\\\)', '', text)
-    # $...$ inline delimiters (but not $$)
     text = re.sub(r'(?<!\$)\$(?!\$)', '', text)
-    # Remaining backslash commands (e.g. \text, \sum, \pm)
     text = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
     text = re.sub(r'\\[a-zA-Z]+', '', text)
+
     return text.strip()
 
 
